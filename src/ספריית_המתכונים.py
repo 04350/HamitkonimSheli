@@ -47,6 +47,10 @@ try:
     from PIL import Image, ImageTk, ExifTags
 except Exception:
     Image = ImageTk = ExifTags = None
+try:
+    import pytesseract
+except Exception:
+    pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
 APP_VERSION = "1.0"
@@ -55,6 +59,33 @@ TEXT_TYPES = {".txt", ".md", ".csv", ".tsv", ".log"}
 DOCUMENT_TYPES = {".pdf", ".docx", ".odt", ".rtf", ".html", ".htm", ".xlsx", ".xlsm", ".pptx", ".epub"}
 MAX_FILE_SIZE = 250 * 1024 * 1024
 MAX_TEXT_LENGTH = 400_000
+
+def configure_ocr():
+    """Locate the bundled offline Tesseract engine and Hebrew language data."""
+    if pytesseract is None:
+        return False
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    candidates = [base / "tesseract" / "tesseract.exe", base / "tesseract.exe"]
+    for candidate in candidates:
+        if candidate.exists():
+            pytesseract.pytesseract.tesseract_cmd = str(candidate)
+            tessdata = candidate.parent / "tessdata"
+            if tessdata.exists():
+                os.environ["TESSDATA_PREFIX"] = str(candidate.parent)
+            return True
+    return False
+
+def ocr_image(image) -> str:
+    if pytesseract is None:
+        return ""
+    try:
+        configure_ocr()
+        return pytesseract.image_to_string(image, lang="heb+eng", config="--psm 6")
+    except Exception:
+        try:
+            return pytesseract.image_to_string(image, lang="eng", config="--psm 6")
+        except Exception:
+            return ""
 
 def data_home() -> Path:
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
@@ -172,7 +203,15 @@ def extract_text(path: Path) -> str:
             text = parser.text()
         elif suffix == ".pdf" and fitz is not None:
             with fitz.open(path) as pdf:
-                text = "\n".join(page.get_text("text") for page in pdf)
+                pages = []
+                for page in pdf:
+                    page_text = page.get_text("text").strip()
+                    if not page_text and Image is not None:
+                        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                        import io
+                        page_text = ocr_image(Image.open(io.BytesIO(pix.tobytes("png"))))
+                    pages.append(page_text)
+                text = "\n".join(pages)
         elif suffix == ".docx" and Document is not None:
             doc = Document(path)
             parts = [p.text for p in doc.paragraphs if p.text.strip()]
@@ -186,6 +225,9 @@ def extract_text(path: Path) -> str:
             text = office_xml_text(path, suffix)
         elif suffix in IMAGE_TYPES:
             text = image_description(path)
+            if not text and Image is not None:
+                with Image.open(path) as image:
+                    text = ocr_image(image.convert("RGB"))
         else:
             text = ""
     except Exception:
@@ -498,12 +540,73 @@ class App:
             messagebox.showinfo("פתיחת קובץ", "יש לבחור קובץ מהרשימה.")
             return
         path = Path(row["stored_path"])
+        self.show_viewer(path, row["title"], row["content"])
+
+    def show_viewer(self, path: Path, title: str, content: str = ""):
+        """Open supported files inside the application, never in an external viewer."""
+        window = tk.Toplevel(self.root)
+        window.title(title)
+        window.geometry("1000x760")
+        window.transient(self.root)
+        header = ttk.Frame(window, padding=8)
+        header.pack(fill="x")
+        ttk.Label(header, text=title, font=("Arial", 16, "bold"), anchor="e").pack(fill="x")
+        body = ttk.Frame(window, padding=8)
+        body.pack(fill="both", expand=True)
+        suffix = path.suffix.lower()
+
+        if suffix in IMAGE_TYPES and Image is not None:
+            self._show_image_in_viewer(body, path)
+        elif suffix == ".pdf" and fitz is not None and Image is not None:
+            try:
+                doc = fitz.open(path)
+                canvas = tk.Canvas(body, background="#555555")
+                scrollbar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+                inner = ttk.Frame(canvas)
+                inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+                canvas.create_window((0, 0), window=inner, anchor="nw")
+                canvas.configure(yscrollcommand=scrollbar.set)
+                canvas.pack(side="right", fill="both", expand=True)
+                scrollbar.pack(side="left", fill="y")
+                for number, page in enumerate(doc, 1):
+                    pix = page.get_pixmap(matrix=fitz.Matrix(1.35, 1.35), alpha=False)
+                    import io
+                    image = Image.open(io.BytesIO(pix.tobytes("png")))
+                    image.thumbnail((900, 1200))
+                    photo = ImageTk.PhotoImage(image.copy())
+                    label = ttk.Label(inner, image=photo)
+                    label.image = photo
+                    label.pack(pady=8)
+                    ttk.Label(inner, text=f"עמוד {number}").pack()
+            except Exception as exc:
+                ttk.Label(body, text=f"לא ניתן להציג את קובץ ה-PDF: {exc}").pack()
+        else:
+            text = content or extract_text(path)
+            if not text:
+                text = "אין אפשרות להציג תצוגה פנימית לתוכן הקובץ הזה. אפשר לשמור אותו בספרייה, אך פורמט זה אינו מפוענח כרגע."
+            text_frame = ttk.Frame(body)
+            text_frame.pack(fill="both", expand=True)
+            viewer = tk.Text(text_frame, wrap="word", font=("Arial", 12), padx=14, pady=12)
+            scroll = ttk.Scrollbar(text_frame, orient="vertical", command=viewer.yview)
+            viewer.configure(yscrollcommand=scroll.set)
+            viewer.pack(side="right", fill="both", expand=True)
+            scroll.pack(side="left", fill="y")
+            viewer.insert("1.0", text)
+            viewer.tag_configure("rtl", justify="right")
+            viewer.tag_add("rtl", "1.0", "end")
+            viewer.configure(state="disabled")
+
+    def _show_image_in_viewer(self, parent, path: Path):
         try:
-            os.startfile(str(path))
-        except AttributeError:
-            webbrowser.open(path.as_uri())
+            image = Image.open(path)
+            image.seek(0)
+            image.thumbnail((900, 650))
+            photo = ImageTk.PhotoImage(image.copy())
+            label = ttk.Label(parent, image=photo)
+            label.image = photo
+            label.pack(expand=True)
         except Exception as exc:
-            messagebox.showerror("שגיאה", f"לא ניתן לפתוח את הקובץ.\n{exc}")
+            ttk.Label(parent, text=f"לא ניתן להציג את התמונה: {exc}").pack()
 
     def rename_selected(self):
         row = self.selected_row()
