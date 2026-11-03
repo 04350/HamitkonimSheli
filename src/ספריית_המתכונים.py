@@ -202,6 +202,23 @@ def choose_title(path: Path, content: str) -> str:
     metadata = image_description(path) if path.suffix.lower() in IMAGE_TYPES else ""
     return safe_title(metadata or path.stem)
 
+def file_kind(suffix: str) -> str:
+    suffix = (suffix or "").lower()
+    if suffix in IMAGE_TYPES:
+        return "תמונה"
+    if suffix in (".xlsx", ".xlsm"):
+        return "גיליון"
+    if suffix == ".pptx":
+        return "מצגת"
+    if suffix == ".epub":
+        return "ספר דיגיטלי"
+    if suffix == ".zip":
+        return "ארכיון"
+    if suffix in TEXT_TYPES or suffix in DOCUMENT_TYPES:
+        return "מסמך"
+    return "קובץ"
+
+
 def file_digest(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -400,7 +417,7 @@ class App:
         for _score, row in ranked:
             iid = str(row["id"])
             self.current_rows[iid] = row
-            ext = row["extension"].lstrip(".").upper() or "קובץ"
+            ext = file_kind(row["extension"])
             self.tree.insert("", "end", iid=iid, values=(row["title"], ext, row["imported_at"]))
         self.status_value.set(f"נמצאו {len(ranked)} קבצים בספרייה.")
         self.preview_photo = None
