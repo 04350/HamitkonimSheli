@@ -146,7 +146,7 @@ class בדיקותספרייה(unittest.TestCase):
             for source in (word_file, excel_file, powerpoint_file):
                 with self.subTest(file=source.suffix):
                     pdf_path, temp_dir, error = app.convert_office_to_pdf(source)
-                    self.assertIsNone(error, error)
+                    self.assertFalse(error, error)
                     self.assertIsNotNone(pdf_path)
                     self.assertTrue(pdf_path.is_file())
                     with app.fitz.open(pdf_path) as pdf:
