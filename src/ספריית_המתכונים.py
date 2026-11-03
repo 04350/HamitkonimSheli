@@ -364,12 +364,7 @@ class App:
         self.root.geometry("1180x760")
         self.root.minsize(900, 580)
         self.style = ttk.Style(self.root)
-        try:
-            self.style.theme_use("clam")
-        except Exception:
-            pass
-        self.style.configure("Treeview", rowheight=30, font=("Arial", 10))
-        self.style.configure("Treeview.Heading", font=("Arial", 10, "bold"))
+        self._apply_styles()
         self.search_value = tk.StringVar()
         self.status_value = tk.StringVar(value="ברוכים הבאים! אפשר להוסיף קבצים או לגרור אותם לחלון.")
         self.preview_photo = None
@@ -384,24 +379,108 @@ class App:
                 pass
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
-    def _build(self):
-        outer = ttk.Frame(self.root, padding=12)
-        outer.pack(fill="both", expand=True)
-        header = ttk.Frame(outer)
-        header.pack(fill="x", pady=(0, 8))
-        ttk.Label(header, text=APP_NAME, font=("Arial", 22, "bold"), anchor="e").pack(fill="x")
-        ttk.Label(header, text="כל המתכונים, המסמכים והתמונות שלך — במקום אחד", font=("Arial", 10), anchor="e").pack(fill="x")
+    def _apply_styles(self):
+        """A cohesive, polished Hebrew desktop theme for the whole application."""
+        self.colors = {
+            "background": "#F3F6FA",
+            "surface": "#FFFFFF",
+            "navy": "#14263D",
+            "text": "#26384D",
+            "muted": "#708196",
+            "border": "#DCE4EE",
+            "accent": "#0F8B8D",
+            "accent_hover": "#0B7476",
+            "soft": "#EAF3F4",
+            "row_alt": "#F7FAFC",
+            "selected": "#DDECEF",
+            "danger": "#B54747",
+        }
+        try:
+            self.style.theme_use("clam")
+        except Exception:
+            pass
+        self.root.configure(background=self.colors["background"])
+        self.style.configure(".", font=("Segoe UI", 10), foreground=self.colors["text"])
+        self.style.configure("App.TFrame", background=self.colors["background"])
+        self.style.configure("Card.TFrame", background=self.colors["surface"])
+        self.style.configure("Panel.TFrame", background=self.colors["surface"])
+        self.style.configure("TLabel", background=self.colors["background"], foreground=self.colors["text"])
+        self.style.configure("Panel.TLabel", background=self.colors["surface"], foreground=self.colors["text"])
+        self.style.configure("Header.TLabel", background=self.colors["background"], foreground=self.colors["navy"], font=("Segoe UI", 25, "bold"))
+        self.style.configure("Subheader.TLabel", background=self.colors["background"], foreground=self.colors["muted"], font=("Segoe UI", 10))
+        self.style.configure("Status.TLabel", background=self.colors["surface"], foreground=self.colors["muted"], padding=(12, 9), font=("Segoe UI", 9))
+        self.style.configure(
+            "Card.TLabelframe", background=self.colors["surface"],
+            bordercolor=self.colors["border"], borderwidth=1, relief="solid", padding=12
+        )
+        self.style.configure(
+            "Card.TLabelframe.Label", background=self.colors["surface"],
+            foreground=self.colors["navy"], font=("Segoe UI", 11, "bold")
+        )
+        self.style.configure(
+            "TButton", font=("Segoe UI", 9, "bold"), padding=(13, 8),
+            background="#E8EEF5", foreground=self.colors["navy"],
+            bordercolor=self.colors["border"], focuscolor=self.colors["accent"]
+        )
+        self.style.map(
+            "TButton",
+            background=[("disabled", "#EEF2F6"), ("pressed", "#D6E0EA"), ("active", "#DDE7F0")],
+            foreground=[("disabled", "#9AA7B5"), ("active", self.colors["navy"])]
+        )
+        self.style.configure(
+            "Primary.TButton", background=self.colors["accent"], foreground="#FFFFFF",
+            bordercolor=self.colors["accent"], padding=(15, 9)
+        )
+        self.style.map(
+            "Primary.TButton",
+            background=[("disabled", "#A8C7C7"), ("pressed", self.colors["accent_hover"]), ("active", self.colors["accent_hover"])],
+            foreground=[("disabled", "#F5FAFA"), ("!disabled", "#FFFFFF")]
+        )
+        self.style.configure(
+            "Danger.TButton", background="#FCEEEE", foreground=self.colors["danger"],
+            bordercolor="#F2D4D4", padding=(13, 8)
+        )
+        self.style.map("Danger.TButton", background=[("pressed", "#F5DADA"), ("active", "#F8E3E3")])
+        self.style.configure(
+            "TEntry", fieldbackground=self.colors["surface"], foreground=self.colors["navy"],
+            padding=10, bordercolor=self.colors["border"], insertcolor=self.colors["navy"]
+        )
+        self.style.configure(
+            "Treeview", rowheight=36, font=("Segoe UI", 10),
+            background=self.colors["surface"], fieldbackground=self.colors["surface"],
+            foreground=self.colors["text"], bordercolor=self.colors["border"], borderwidth=0
+        )
+        self.style.configure(
+            "Treeview.Heading", font=("Segoe UI", 9, "bold"),
+            background="#EAF0F6", foreground=self.colors["navy"],
+            padding=(10, 11), relief="flat"
+        )
+        self.style.map(
+            "Treeview", background=[("selected", self.colors["selected"])],
+            foreground=[("selected", self.colors["navy"])]
+        )
+        self.style.map("Treeview.Heading", background=[("active", "#DDE7F0")])
+        self.style.configure("Vertical.TScrollbar", background="#E2EAF2", troughcolor="#F3F6FA", bordercolor="#F3F6FA", arrowsize=14)
 
-        search_frame = ttk.Frame(outer)
-        search_frame.pack(fill="x", pady=8)
-        ttk.Label(search_frame, text="חיפוש:", font=("Arial", 11, "bold")).pack(side="right", padx=(8, 4))
-        entry = ttk.Entry(search_frame, textvariable=self.search_value, justify="right", font=("Arial", 12))
-        entry.pack(side="right", fill="x", expand=True)
+    def _build(self):
+        outer = ttk.Frame(self.root, padding=20, style="App.TFrame")
+        outer.pack(fill="both", expand=True)
+        header = ttk.Frame(outer, style="App.TFrame")
+        header.pack(fill="x", pady=(0, 10))
+        ttk.Label(header, text=APP_NAME, style="Header.TLabel", anchor="e").pack(fill="x")
+        ttk.Label(header, text="כל המתכונים, המסמכים והתמונות שלך — במקום אחד", style="Subheader.TLabel", anchor="e").pack(fill="x", pady=(2, 0))
+        tk.Frame(header, height=3, background=self.colors["accent"], bd=0).pack(fill="x", pady=(12, 0))
+
+        search_frame = ttk.Frame(outer, padding=(12, 10), style="Panel.TFrame")
+        search_frame.pack(fill="x", pady=(4, 12))
+        ttk.Label(search_frame, text="חיפוש", style="Panel.TLabel", font=("Segoe UI", 10, "bold")).pack(side="right", padx=(8, 4))
+        entry = ttk.Entry(search_frame, textvariable=self.search_value, justify="right", font=("Segoe UI", 12))
+        entry.pack(side="right", fill="x", expand=True, padx=4)
         entry.bind("<KeyRelease>", lambda _event: self.refresh())
         ttk.Button(search_frame, text="נקה חיפוש", command=lambda: self.search_value.set("") or self.refresh()).pack(side="left", padx=5)
 
-        toolbar = ttk.Frame(outer)
-        toolbar.pack(fill="x", pady=(0, 8))
+        toolbar = ttk.Frame(outer, style="App.TFrame")
+        toolbar.pack(fill="x", pady=(0, 10))
         actions = [
             ("הוספת קבצים", self.add_files),
             ("ייבוא תיקייה", self.add_folder),
@@ -410,21 +489,24 @@ class App:
             ("הגדרות", self.settings),
         ]
         for label, command in actions:
-            ttk.Button(toolbar, text=label, command=command).pack(side="right", padx=3)
+            style = "Primary.TButton" if label == "הוספת קבצים" else "TButton"
+            ttk.Button(toolbar, text=label, command=command, style=style).pack(side="right", padx=4)
 
-        body = ttk.Frame(outer)
+        body = ttk.Frame(outer, style="App.TFrame")
         body.pack(fill="both", expand=True)
-        preview = ttk.LabelFrame(body, text="תצוגה מקדימה", padding=10)
-        preview.pack(side="left", fill="y", padx=(0, 10))
-        self.preview_image = ttk.Label(preview, text="בחרו תמונה או קובץ מהרשימה", anchor="center", justify="center", width=34)
+        preview = ttk.LabelFrame(body, text="תצוגה מקדימה", style="Card.TLabelframe")
+        preview.pack(side="left", fill="y", padx=(0, 12))
+        preview.configure(width=310)
+        preview.pack_propagate(False)
+        self.preview_image = ttk.Label(preview, text="בחרו תמונה או קובץ מהרשימה", style="Panel.TLabel", anchor="center", justify="center", width=34)
         self.preview_image.pack(fill="both", expand=True)
-        self.detail_label = ttk.Label(preview, text="", justify="right", anchor="e", wraplength=280)
-        self.detail_label.pack(fill="x", pady=8)
-        ttk.Button(preview, text="פתיחת הקובץ", command=self.open_selected).pack(fill="x", pady=2)
-        ttk.Button(preview, text="שינוי שם", command=self.rename_selected).pack(fill="x", pady=2)
-        ttk.Button(preview, text="הסרה מהספרייה", command=self.delete_selected).pack(fill="x", pady=2)
+        self.detail_label = ttk.Label(preview, text="", style="Panel.TLabel", justify="right", anchor="e", wraplength=270)
+        self.detail_label.pack(fill="x", pady=10)
+        ttk.Button(preview, text="פתיחת הקובץ", command=self.open_selected, style="Primary.TButton").pack(fill="x", pady=4)
+        ttk.Button(preview, text="שינוי שם", command=self.rename_selected).pack(fill="x", pady=4)
+        ttk.Button(preview, text="הסרה מהספרייה", command=self.delete_selected, style="Danger.TButton").pack(fill="x", pady=4)
 
-        table_frame = ttk.Frame(body)
+        table_frame = ttk.Frame(body, style="Card.TFrame")
         table_frame.pack(side="right", fill="both", expand=True)
         columns = ("title", "kind", "date")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
@@ -436,13 +518,15 @@ class App:
         self.tree.column("date", width=135, anchor="e")
         scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side="right", fill="both", expand=True)
-        scroll.pack(side="left", fill="y")
+        self.tree.tag_configure("even", background=self.colors["surface"])
+        self.tree.tag_configure("odd", background=self.colors["row_alt"])
+        self.tree.pack(side="right", fill="both", expand=True, padx=4, pady=4)
+        scroll.pack(side="left", fill="y", padx=(0, 3), pady=4)
         self.tree.bind("<<TreeviewSelect>>", self.show_selected)
         self.tree.bind("<Double-1>", lambda _event: self.open_selected())
 
-        ttk.Separator(outer).pack(fill="x", pady=(8, 4))
-        ttk.Label(outer, textvariable=self.status_value, anchor="e").pack(fill="x")
+        ttk.Separator(outer).pack(fill="x", pady=(10, 5))
+        ttk.Label(outer, textvariable=self.status_value, style="Status.TLabel", anchor="e").pack(fill="x")
 
     def refresh(self):
         query = self.search_value.get()
@@ -456,11 +540,11 @@ class App:
                 ranked.append((score, row))
         ranked.sort(key=lambda pair: (pair[0], pair[1]["id"]), reverse=True)
         self.current_rows = {}
-        for _score, row in ranked:
+        for index, (_score, row) in enumerate(ranked):
             iid = str(row["id"])
             self.current_rows[iid] = row
             ext = file_kind(row["extension"])
-            self.tree.insert("", "end", iid=iid, values=(row["title"], ext, row["imported_at"]))
+            self.tree.insert("", "end", iid=iid, values=(row["title"], ext, row["imported_at"]), tags=("even" if index % 2 == 0 else "odd",))
         self.status_value.set(f"נמצאו {len(ranked)} קבצים בספרייה.")
         self.preview_photo = None
         self.preview_image.configure(image="", text="בחרו קובץ מהרשימה")
@@ -546,12 +630,14 @@ class App:
         """Open supported files inside the application, never in an external viewer."""
         window = tk.Toplevel(self.root)
         window.title(title)
-        window.geometry("1000x760")
+        window.geometry("1080x800")
+        window.minsize(720, 500)
+        window.configure(background=self.colors["background"])
         window.transient(self.root)
-        header = ttk.Frame(window, padding=8)
-        header.pack(fill="x")
-        ttk.Label(header, text=title, font=("Arial", 16, "bold"), anchor="e").pack(fill="x")
-        body = ttk.Frame(window, padding=8)
+        header = ttk.Frame(window, padding=(16, 12), style="Panel.TFrame")
+        header.pack(fill="x", padx=12, pady=(12, 4))
+        ttk.Label(header, text=title, style="Header.TLabel", anchor="e").pack(fill="x")
+        body = ttk.Frame(window, padding=10, style="App.TFrame")
         body.pack(fill="both", expand=True)
         suffix = path.suffix.lower()
 
@@ -560,7 +646,7 @@ class App:
         elif suffix == ".pdf" and fitz is not None and Image is not None:
             try:
                 doc = fitz.open(path)
-                canvas = tk.Canvas(body, background="#555555")
+                canvas = tk.Canvas(body, background="#E8EDF3", highlightthickness=0)
                 scrollbar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
                 inner = ttk.Frame(canvas)
                 inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
@@ -586,7 +672,12 @@ class App:
                 text = "אין אפשרות להציג תצוגה פנימית לתוכן הקובץ הזה. אפשר לשמור אותו בספרייה, אך פורמט זה אינו מפוענח כרגע."
             text_frame = ttk.Frame(body)
             text_frame.pack(fill="both", expand=True)
-            viewer = tk.Text(text_frame, wrap="word", font=("Arial", 12), padx=14, pady=12)
+            viewer = tk.Text(
+                text_frame, wrap="word", font=("Segoe UI", 12), padx=18, pady=16,
+                background="#FFFFFF", foreground=self.colors["text"],
+                insertbackground=self.colors["accent"], relief="flat",
+                highlightthickness=1, highlightbackground=self.colors["border"]
+            )
             scroll = ttk.Scrollbar(text_frame, orient="vertical", command=viewer.yview)
             viewer.configure(yscrollcommand=scroll.set)
             viewer.pack(side="right", fill="both", expand=True)
