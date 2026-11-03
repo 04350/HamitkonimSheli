@@ -71,7 +71,7 @@ def configure_ocr():
             pytesseract.pytesseract.tesseract_cmd = str(candidate)
             tessdata = candidate.parent / "tessdata"
             if tessdata.exists():
-                os.environ["TESSDATA_PREFIX"] = str(candidate.parent)
+                os.environ["TESSDATA_PREFIX"] = str(tessdata)
             return True
     return False
 
