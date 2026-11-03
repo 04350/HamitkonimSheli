@@ -9,6 +9,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import ספריית_המתכונים as app
 from PIL import Image, PngImagePlugin
+from openpyxl import Workbook
+from pptx import Presentation
 
 class בדיקותספרייה(unittest.TestCase):
     def test_ניקוי_חיפוש_עברית_וניקוד(self):
@@ -72,6 +74,93 @@ class בדיקותספרייה(unittest.TestCase):
             with patch.object(app, "ocr_image", return_value="מתכון סרוק") as ocr:
                 self.assertEqual(app.extract_text(source), "מתכון סרוק")
                 ocr.assert_called_once()
+
+    def test_זיהוי_סוגי_קבצים_נוספים(self):
+        self.assertIn(".doc", app.OFFICE_TYPES)
+        self.assertIn(".xls", app.OFFICE_TYPES)
+        self.assertIn(".ppt", app.OFFICE_TYPES)
+        self.assertIn(".docm", app.OFFICE_TYPES)
+        self.assertIn(".ods", app.OFFICE_TYPES)
+        self.assertEqual(app.file_kind(".xls"), "גיליון")
+        self.assertEqual(app.file_kind(".ppt"), "מצגת")
+        self.assertEqual(app.file_kind(".mobi"), "ספר דיגיטלי")
+        self.assertIn(".epub", app.DOCUMENT_TYPES)
+
+    def test_ספר_דיגיטלי_epub_נפתח_ונקרא(self):
+        if app.fitz is None:
+            self.skipTest("נדרשת ספריית PyMuPDF")
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "בדיקה.epub"
+            container_xml = (
+                '<?xml version="1.0"?>'
+                '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">'
+                '<rootfiles><rootfile full-path="OEBPS/content.opf" '
+                'media-type="application/oebps-package+xml"/></rootfiles></container>'
+            )
+            package_xml = (
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">'
+                '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                '<dc:title>ספר בדיקה</dc:title></metadata>'
+                '<manifest><item id="chapter" href="chapter.xhtml" '
+                'media-type="application/xhtml+xml"/></manifest>'
+                '<spine><itemref idref="chapter"/></spine></package>'
+            )
+            chapter = (
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>בדיקה</title></head>'
+                '<body><h1>עוגת תפוחים</h1><p>זהו טקסט בדיקה מתוך ספר דיגיטלי.</p></body></html>'
+            )
+            with app.zipfile.ZipFile(source, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip", compress_type=app.zipfile.ZIP_STORED)
+                archive.writestr("META-INF/container.xml", container_xml)
+                archive.writestr("OEBPS/content.opf", package_xml)
+                archive.writestr("OEBPS/chapter.xhtml", chapter)
+            with app.fitz.open(source) as ebook:
+                self.assertGreater(ebook.page_count, 0)
+            extracted = app.extract_text(source)
+            self.assertIn("עוגת תפוחים", extracted)
+
+    @unittest.skipUnless(app.find_libreoffice() is not None, "נדרשת התקנת LibreOffice (קיימת בחבילת Windows)")
+    def test_המרת_word_excel_powerpoint_ל_pdf(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            word_file = folder / "בדיקת Word.docx"
+            word = app.Document()
+            word.add_paragraph("WORD PREVIEW CHECK")
+            word.save(word_file)
+
+            excel_file = folder / "בדיקת Excel.xlsx"
+            workbook = Workbook()
+            workbook.active["A1"] = "EXCEL PREVIEW CHECK"
+            workbook.save(excel_file)
+
+            powerpoint_file = folder / "בדיקת PowerPoint.pptx"
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+            box = slide.shapes.add_textbox(100, 100, 500, 100)
+            box.text = "POWERPOINT PREVIEW CHECK"
+            presentation.save(powerpoint_file)
+
+            for source in (word_file, excel_file, powerpoint_file):
+                with self.subTest(file=source.suffix):
+                    pdf_path, temp_dir, error = app.convert_office_to_pdf(source)
+                    self.assertIsNone(error, error)
+                    self.assertIsNotNone(pdf_path)
+                    self.assertTrue(pdf_path.is_file())
+                    with app.fitz.open(pdf_path) as pdf:
+                        self.assertGreater(pdf.page_count, 0)
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_קובץ_office_פגום_לא_מפיל_את_ההמרה(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "קובץ.docx"
+            source.write_bytes(b"this is not a valid Office document")
+            with patch.object(app, "find_libreoffice", return_value=None):
+                pdf_path, temp_dir, error = app.convert_office_to_pdf(source)
+            self.assertIsNone(pdf_path)
+            self.assertIsNone(temp_dir)
+            self.assertTrue(error)
 
     def test_שם_ללא_תוכן_נשאר_קריא(self):
         self.assertGreater(app.relevance("קובץ תמונה", "", "תמונה"), 0)
