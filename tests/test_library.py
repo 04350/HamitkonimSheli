@@ -4,6 +4,7 @@ import unittest
 import os
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import ספריית_המתכונים as app
@@ -51,6 +52,26 @@ class בדיקותספרייה(unittest.TestCase):
         self.assertEqual(app.file_kind(".png"), "תמונה")
         self.assertEqual(app.file_kind(".pdf"), "מסמך")
         self.assertEqual(app.file_kind(".xlsx"), "גיליון")
+
+    def test_זיהוי_טקסט_מתמונה_ללא_מטאדאטה(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "סריקה.png"
+            Image.new("RGB", (120, 80), "white").save(source)
+            with patch.object(app, "ocr_image", return_value="עוגת תפוחים") as ocr:
+                self.assertEqual(app.extract_text(source), "עוגת תפוחים")
+                ocr.assert_called_once()
+
+    @unittest.skipIf(app.fitz is None or app.Image is None, "נדרשות ספריות PDF ותמונה")
+    def test_זיהוי_טקסט_במסמך_pdf_סרוק(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "סריקה.pdf"
+            document = app.fitz.open()
+            document.new_page()
+            document.save(str(source))
+            document.close()
+            with patch.object(app, "ocr_image", return_value="מתכון סרוק") as ocr:
+                self.assertEqual(app.extract_text(source), "מתכון סרוק")
+                ocr.assert_called_once()
 
     def test_שם_ללא_תוכן_נשאר_קריא(self):
         self.assertGreater(app.relevance("קובץ תמונה", "", "תמונה"), 0)
