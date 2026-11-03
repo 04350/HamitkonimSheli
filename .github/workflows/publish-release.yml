@@ -1,0 +1,55 @@
+name: פרסום חבילת Windows להורדה ישירה
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: מזהה הרצת הבנייה שממנה מורידים את החבילה
+        required: true
+        default: "41709644931"
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: הורדת החבילה המלאה מהרצת הבנייה
+        uses: actions/download-artifact@v4
+        with:
+          name: ספריית-המתכונים-שלי-Windows-כולל-Office
+          path: release-assets
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: הכנת קובץ בשם נוח לקישור
+        shell: bash
+        run: |
+          source_file="release-assets/ספריית-המתכונים-שלי-Windows-כולל-תצוגת-Office.zip"
+          if [ ! -f "$source_file" ]; then
+            echo "לא נמצא קובץ החבילה שהורד מההרצה"
+            find release-assets -maxdepth 2 -type f -print
+            exit 1
+          fi
+          cp "$source_file" recipe-library-windows-office.zip
+          ls -lh recipe-library-windows-office.zip
+
+      - name: פרסום או עדכון Release עם קובץ ההורדה
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.1.0
+          name: ספריית המתכונים שלי – Windows v1.1.0
+          target_commitish: main
+          body: |
+            חבילת Windows המלאה של ספריית המתכונים שלי.
+
+            **הורדה:** קובץ ZIP נייד הכולל את התוכנה ואת מנוע התצוגה למסמכי Office.
+            לאחר החילוץ יש להשאיר את קובץ ההפעלה ואת תיקיית LibreOffice יחד.
+          files: recipe-library-windows-office.zip
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          make_latest: true
