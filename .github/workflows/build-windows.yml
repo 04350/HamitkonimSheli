@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: בניית התוכנה למחשב
 
 on:
   push:
@@ -6,6 +6,7 @@ on:
     paths:
       - 'src/**'
       - '.github/workflows/build-windows.yml'
+      - 'tests/**'
   workflow_dispatch:
 
 permissions:
@@ -15,63 +16,59 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - name: Checkout
+      - name: הורדת קובצי הפרויקט
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: התקנת סביבת פייתון
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Restore application source
-        shell: pwsh
-        run: |
-          $encoded = Get-Content "src/recipes_app.py.gz.b64" -Raw
-          $bytes = [Convert]::FromBase64String($encoded)
-          $inputStream = [System.IO.MemoryStream]::new($bytes)
-          $gzip = [System.IO.Compression.GzipStream]::new($inputStream, [System.IO.Compression.CompressionMode]::Decompress)
-          $outputStream = [System.IO.File]::Create("src/recipes_app.py")
-          $gzip.CopyTo($outputStream)
-          $outputStream.Dispose()
-          $gzip.Dispose()
-          $inputStream.Dispose()
-          python -m py_compile "src/recipes_app.py"
-
-      - name: Install offline runtime libraries
+      - name: התקנת ספריות הדרושות לבנייה
         run: |
           python -m pip install --upgrade pip
-          python -m pip install PyMuPDF python-docx striprtf tkinterdnd2 pyinstaller
+          python -m pip install PyMuPDF python-docx striprtf pillow tkinterdnd2 pyinstaller
 
-      - name: Build single-file Windows application
+      - name: בדיקת תקינות קוד ובדיקות יחידה
+        run: |
+          python -m py_compile "src/ספריית_המתכונים.py"
+          python -m unittest discover -s tests -v
+
+      - name: יצירת קובץ הפעלה יחיד בעברית
         run: >
           pyinstaller --noconfirm --clean --onefile --windowed
-          --name HamitkonimSheli
+          --name "ספריית_המתכונים_שלי"
           --collect-all fitz
+          --collect-all PIL
           --collect-all tkinterdnd2
           --hidden-import striprtf.striprtf
           --hidden-import docx
-          "src/recipes_app.py"
+          "src/ספריית_המתכונים.py"
 
-      - name: Verify executable exists
+      - name: בדיקה שקובץ ההפעלה נוצר
         shell: pwsh
         run: |
-          if (!(Test-Path "dist/HamitkonimSheli.exe")) { throw "EXE was not created" }
-          Get-Item "dist/HamitkonimSheli.exe" | Format-List Name,Length,LastWriteTime
+          $exe = "dist/ספריית_המתכונים_שלי.exe"
+          if (!(Test-Path $exe)) { throw "קובץ ההפעלה לא נוצר" }
+          $file = Get-Item $exe
+          if ($file.Length -lt 5000000) { throw "קובץ ההפעלה קטן מהצפוי" }
+          Write-Host "נוצר קובץ הפעלה בגודל $($file.Length) בתים"
 
-      - name: Smoke test startup
+      - name: בדיקת פתיחה של התוכנה
         shell: pwsh
         run: |
-          $process = Start-Process -FilePath "dist/HamitkonimSheli.exe" -PassThru
-          Start-Sleep -Seconds 6
+          $exe = "dist/ספריית_המתכונים_שלי.exe"
+          $process = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
           $process.Refresh()
-          if ($process.HasExited) { throw "The EXE exited during its startup smoke test." }
+          if ($process.HasExited) { throw "התוכנה נסגרה מיד לאחר ההפעלה" }
           Stop-Process -Id $process.Id -Force
-          Write-Host "GUI process remained alive during startup smoke test."
+          Write-Host "בדיקת הפעלה עברה בהצלחה"
 
-      - name: Upload ready EXE
+      - name: שמירת קובץ ההפעלה להורדה
         uses: actions/upload-artifact@v4
         with:
-          name: HamitkonimSheli-Windows-EXE
-          path: dist/HamitkonimSheli.exe
+          name: ספריית-המתכונים-שלי-Windows
+          path: dist/ספריית_המתכונים_שלי.exe
           if-no-files-found: error
           retention-days: 30
