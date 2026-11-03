@@ -80,10 +80,10 @@ def ocr_image(image) -> str:
         return ""
     try:
         configure_ocr()
-        return pytesseract.image_to_string(image, lang="heb+eng", config="--psm 6")
+        return pytesseract.image_to_string(image, lang="heb+eng", config="--psm 6", timeout=60)
     except Exception:
         try:
-            return pytesseract.image_to_string(image, lang="eng", config="--psm 6")
+            return pytesseract.image_to_string(image, lang="eng", config="--psm 6", timeout=60)
         except Exception:
             return ""
 
@@ -224,10 +224,12 @@ def extract_text(path: Path) -> str:
         elif suffix in (".odt", ".xlsx", ".xlsm", ".pptx", ".epub"):
             text = office_xml_text(path, suffix)
         elif suffix in IMAGE_TYPES:
-            text = image_description(path)
-            if not text and Image is not None:
+            metadata = image_description(path)
+            recognized = ""
+            if Image is not None:
                 with Image.open(path) as image:
-                    text = ocr_image(image.convert("RGB"))
+                    recognized = ocr_image(image.convert("RGB"))
+            text = "\\n".join(part for part in (metadata, recognized) if part)
         else:
             text = ""
     except Exception:
@@ -508,14 +510,14 @@ class App:
 
         table_frame = ttk.Frame(body, style="Card.TFrame")
         table_frame.pack(side="right", fill="both", expand=True)
-        columns = ("title", "kind", "date")
+        columns = ("date", "kind", "title")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
-        self.tree.heading("title", text="שם המתכון או הקובץ", anchor="e")
-        self.tree.heading("kind", text="סוג קובץ", anchor="e")
         self.tree.heading("date", text="תאריך הוספה", anchor="e")
-        self.tree.column("title", width=440, anchor="e")
-        self.tree.column("kind", width=105, anchor="e")
+        self.tree.heading("kind", text="סוג קובץ", anchor="e")
+        self.tree.heading("title", text="שם המתכון או הקובץ", anchor="e")
         self.tree.column("date", width=135, anchor="e")
+        self.tree.column("kind", width=105, anchor="e")
+        self.tree.column("title", width=440, anchor="e")
         scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.tag_configure("even", background=self.colors["surface"])
@@ -544,7 +546,7 @@ class App:
             iid = str(row["id"])
             self.current_rows[iid] = row
             ext = file_kind(row["extension"])
-            self.tree.insert("", "end", iid=iid, values=(row["title"], ext, row["imported_at"]), tags=("even" if index % 2 == 0 else "odd",))
+            self.tree.insert("", "end", iid=iid, values=(row["imported_at"], ext, row["title"]), tags=("even" if index % 2 == 0 else "odd",))
         self.status_value.set(f"נמצאו {len(ranked)} קבצים בספרייה.")
         self.preview_photo = None
         self.preview_image.configure(image="", text="בחרו קובץ מהרשימה")
