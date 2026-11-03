@@ -48,10 +48,10 @@ jobs:
           pytesseract.pytesseract.tesseract_cmd = str(root / "tesseract.exe")
           os.environ["TESSDATA_PREFIX"] = str(root / "tessdata")
           for required in ("eng.traineddata", "heb.traineddata"):
-    data_file = root / "tessdata" / required
-    if not data_file.exists() or data_file.stat().st_size < 100_000:
-        raise SystemExit(f"קובץ שפה חסר או פגום: {data_file}")
-languages = set(pytesseract.get_languages())
+              data_file = root / "tessdata" / required
+              if not data_file.exists() or data_file.stat().st_size < 100_000:
+                  raise SystemExit(f"קובץ שפה חסר או פגום: {data_file}")
+          languages = set(pytesseract.get_languages())
           if not {"eng", "heb"}.issubset(languages):
               raise SystemExit(f"שפות OCR חסרות: {languages}")
 
