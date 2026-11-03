@@ -64,8 +64,13 @@ def configure_ocr():
     """Locate the bundled offline Tesseract engine and Hebrew language data."""
     if pytesseract is None:
         return False
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    candidates = [base / "tesseract" / "tesseract.exe", base / "tesseract.exe"]
+    module_dir = Path(__file__).resolve().parent
+    base = Path(getattr(sys, "_MEIPASS", module_dir))
+    candidates = [
+        base / "tesseract" / "tesseract.exe",
+        base / "tesseract.exe",
+        module_dir.parent / "tesseract" / "tesseract.exe",
+    ]
     for candidate in candidates:
         if candidate.exists():
             pytesseract.pytesseract.tesseract_cmd = str(candidate)
