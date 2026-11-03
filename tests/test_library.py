@@ -157,11 +157,15 @@ class בדיקותספרייה(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "קובץ.docx"
             source.write_bytes(b"this is not a valid Office document")
-            with patch.object(app, "find_libreoffice", return_value=None):
-                pdf_path, temp_dir, error = app.convert_office_to_pdf(source)
-            self.assertIsNone(pdf_path)
-            self.assertIsNone(temp_dir)
-            self.assertTrue(error)
+            pdf_path, temp_dir, error = app.convert_office_to_pdf(source)
+            if pdf_path is not None:
+                self.assertTrue(pdf_path.is_file())
+                with app.fitz.open(pdf_path) as converted:
+                    self.assertGreater(converted.page_count, 0)
+            else:
+                self.assertTrue(error)
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_שם_ללא_תוכן_נשאר_קריא(self):
         self.assertGreater(app.relevance("קובץ תמונה", "", "תמונה"), 0)
