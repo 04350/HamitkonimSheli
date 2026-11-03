@@ -35,6 +35,33 @@ jobs:
           Copy-Item 'C:\Program Files\Tesseract-OCR\tessdata\eng.traineddata' tesseract/tessdata/
           Invoke-WebRequest -Uri 'https://github.com/tesseract-ocr/tessdata_fast/raw/main/heb.traineddata' -OutFile 'tesseract/tessdata/heb.traineddata'
 
+      - name: בדיקת מנוע OCR בעברית ובאנגלית
+        shell: pwsh
+        run: |
+          @'
+          import os
+          from pathlib import Path
+          from PIL import Image, ImageDraw, ImageFont
+          import pytesseract
+
+          root = Path("tesseract").resolve()
+          pytesseract.pytesseract.tesseract_cmd = str(root / "tesseract.exe")
+          os.environ["TESSDATA_PREFIX"] = str(root)
+          languages = set(pytesseract.get_languages())
+          if not {"eng", "heb"}.issubset(languages):
+              raise SystemExit(f"שפות OCR חסרות: {languages}")
+
+          image = Image.new("RGB", (900, 180), "white")
+          draw = ImageDraw.Draw(image)
+          font_path = Path(r"C:\Windows\Fonts\arial.ttf")
+          font = ImageFont.truetype(str(font_path), 64) if font_path.exists() else ImageFont.load_default()
+          draw.text((30, 35), "APPLE RECIPE", fill="black", font=font)
+          recognized = pytesseract.image_to_string(image, lang="heb+eng", config="--psm 6").upper()
+          if "APPLE" not in recognized:
+              raise SystemExit(f"בדיקת OCR נכשלה. התקבל: {recognized!r}")
+          print("OCR תקין: מנוע Tesseract ושפות עברית ואנגלית נטענו, וטקסט זוהה.")
+          '@ | python -
+
       - name: בדיקת תקינות קוד ובדיקות יחידה
         run: |
           python -m py_compile "src/ספריית_המתכונים.py"
