@@ -39,19 +39,21 @@ jobs:
         shell: pwsh
         run: |
           @'
-          import os
+          import sys
           from pathlib import Path
           from PIL import Image, ImageDraw, ImageFont
-          import pytesseract
+
+          sys.path.insert(0, "src")
+          import ספריית_המתכונים as app
 
           root = Path("tesseract").resolve()
-          pytesseract.pytesseract.tesseract_cmd = str(root / "tesseract.exe")
-          os.environ["TESSDATA_PREFIX"] = str(root / "tessdata")
           for required in ("eng.traineddata", "heb.traineddata"):
               data_file = root / "tessdata" / required
               if not data_file.exists() or data_file.stat().st_size < 100_000:
                   raise SystemExit(f"קובץ שפה חסר או פגום: {data_file}")
-          languages = set(pytesseract.get_languages())
+          if not app.configure_ocr():
+              raise SystemExit("מנוע Tesseract לא אותר על ידי התוכנה")
+          languages = set(app.pytesseract.get_languages())
           if not {"eng", "heb"}.issubset(languages):
               raise SystemExit(f"שפות OCR חסרות: {languages}")
 
@@ -60,7 +62,7 @@ jobs:
           font_path = Path(r"C:\Windows\Fonts\arial.ttf")
           font = ImageFont.truetype(str(font_path), 64) if font_path.exists() else ImageFont.load_default()
           draw.text((30, 35), "APPLE RECIPE", fill="black", font=font)
-          recognized = pytesseract.image_to_string(image, lang="heb+eng", config="--psm 6").upper()
+          recognized = app.ocr_image(image).upper()
           if "APPLE" not in recognized:
               raise SystemExit(f"בדיקת OCR נכשלה. התקבל: {recognized!r}")
           print("OCR תקין: מנוע Tesseract ושפות עברית ואנגלית נטענו, וטקסט זוהה.")
