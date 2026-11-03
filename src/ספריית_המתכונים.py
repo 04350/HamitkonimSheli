@@ -13,6 +13,7 @@ import json
 import hashlib
 import shutil
 import sqlite3
+import tempfile
 import zipfile
 import subprocess
 import webbrowser
@@ -53,12 +54,113 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 TEXT_TYPES = {".txt", ".md", ".csv", ".tsv", ".log"}
-DOCUMENT_TYPES = {".pdf", ".docx", ".odt", ".rtf", ".html", ".htm", ".xlsx", ".xlsm", ".pptx", ".epub"}
+WORD_TYPES = {".doc", ".docx", ".docm", ".odt", ".rtf"}
+EXCEL_TYPES = {".xls", ".xlsx", ".xlsm", ".ods"}
+PRESENTATION_TYPES = {".ppt", ".pptx", ".pptm", ".odp"}
+OFFICE_TYPES = WORD_TYPES | EXCEL_TYPES | PRESENTATION_TYPES
+EBOOK_TYPES = {".epub", ".mobi", ".fb2"}
+DOCUMENT_TYPES = {".pdf", ".html", ".htm"} | OFFICE_TYPES | EBOOK_TYPES
 MAX_FILE_SIZE = 250 * 1024 * 1024
 MAX_TEXT_LENGTH = 400_000
+
+def find_libreoffice() -> Path | None:
+    """Find the bundled or system LibreOffice command-line executable."""
+    names = ("soffice.com", "soffice.exe")
+    roots = []
+
+    if getattr(sys, "frozen", False):
+        roots.append(Path(sys.executable).resolve().parent)
+    module_dir = Path(__file__).resolve().parent
+    roots.extend((module_dir, module_dir.parent))
+
+    program_files = os.environ.get("PROGRAMFILES")
+    if program_files:
+        roots.append(Path(program_files))
+    program_files_x86 = os.environ.get("PROGRAMFILES(X86)")
+    if program_files_x86:
+        roots.append(Path(program_files_x86))
+
+    for root in roots:
+        for name in names:
+            candidate = root / "LibreOffice" / "program" / name
+            if candidate.is_file():
+                return candidate
+            candidate = root / "program" / name
+            if candidate.is_file() and candidate.parent.name.lower() == "program":
+                return candidate
+
+    for name in ("soffice.com", "soffice.exe", "soffice"):
+        located = shutil.which(name)
+        if located:
+            return Path(located)
+    return None
+
+
+def convert_office_to_pdf(source: Path, timeout: int = 180) -> tuple[Path | None, Path | None, str]:
+    """Convert an Office document to a temporary PDF without showing LibreOffice's UI.
+
+    Returns (pdf_path, temporary_directory, error_message). The caller owns
+    the temporary directory and must remove it when the preview window closes.
+    """
+    source = Path(source)
+    suffix = source.suffix.lower()
+    if suffix not in OFFICE_TYPES:
+        return None, None, "סוג הקובץ אינו נתמך להמרה."
+    if not source.is_file():
+        return None, None, "הקובץ לא נמצא."
+    executable = find_libreoffice()
+    if executable is None:
+        return None, None, "מנוע התצוגה של Office לא נמצא. יש לוודא שתיקיית LibreOffice נמצאת לצד קובץ התוכנה."
+
+    temporary_directory = Path(tempfile.mkdtemp(prefix="ספריית-מתכונים-office-"))
+    output_directory = temporary_directory / "output"
+    profile_directory = temporary_directory / "profile"
+    output_directory.mkdir()
+    profile_directory.mkdir()
+    output_pdf = output_directory / (source.stem + ".pdf")
+    command = [
+        str(executable),
+        "--headless",
+        "--nologo",
+        "--nodefault",
+        "--nolockcheck",
+        f"-env:UserInstallation={profile_directory.resolve().as_uri()}",
+        "--convert-to",
+        "pdf",
+        "--outdir",
+        str(output_directory),
+        str(source.resolve()),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=max(10, int(timeout)),
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if not output_pdf.is_file() or output_pdf.stat().st_size < 100:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            detail = detail[-700:] if detail else "LibreOffice לא הפיק קובץ PDF תקין."
+            raise RuntimeError(detail)
+        if fitz is not None:
+            with fitz.open(output_pdf) as converted:
+                if converted.page_count < 1:
+                    raise RuntimeError("קובץ ה-PDF שהתקבל אינו מכיל עמודים.")
+        return output_pdf, temporary_directory, ""
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(temporary_directory, ignore_errors=True)
+        return None, None, "המרת הקובץ ארכה יותר מדי זמן והופסקה כדי למנוע תקיעה."
+    except Exception as exc:
+        shutil.rmtree(temporary_directory, ignore_errors=True)
+        return None, None, f"לא ניתן להציג את מסמך Office: {exc}"
+
 
 def configure_ocr():
     """Locate the bundled offline Tesseract engine and Hebrew language data."""
@@ -149,14 +251,14 @@ class TextCollector(HTMLParser):
 def office_xml_text(path: Path, suffix: str) -> str:
     pieces = []
     with zipfile.ZipFile(path) as archive:
-        if suffix == ".odt":
+        if suffix in (".docx", ".docm"):
+            names = ["word/document.xml"]
+        elif suffix == ".odt":
             names = ["content.xml"]
         elif suffix in (".xlsx", ".xlsm"):
             names = [n for n in archive.namelist() if n == "xl/sharedStrings.xml" or re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)]
-        elif suffix == ".pptx":
+        elif suffix in (".pptx", ".pptm"):
             names = sorted(n for n in archive.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n))
-        elif suffix == ".epub":
-            names = [n for n in archive.namelist() if n.lower().endswith((".xhtml", ".html", ".htm"))]
         else:
             names = []
         for name in names:
@@ -217,7 +319,10 @@ def extract_text(path: Path) -> str:
                         page_text = ocr_image(Image.open(io.BytesIO(pix.tobytes("png"))))
                     pages.append(page_text)
                 text = "\n".join(pages)
-        elif suffix == ".docx" and Document is not None:
+        elif suffix in EBOOK_TYPES and fitz is not None:
+            with fitz.open(path) as ebook:
+                text = "\n".join(page.get_text("text").strip() for page in ebook)
+        elif suffix in (".docx", ".docm") and Document is not None:
             doc = Document(path)
             parts = [p.text for p in doc.paragraphs if p.text.strip()]
             for table in doc.tables:
@@ -226,7 +331,7 @@ def extract_text(path: Path) -> str:
             text = "\n".join(parts)
         elif suffix == ".rtf" and rtf_to_text is not None:
             text = rtf_to_text(decode_text(path.read_bytes()))
-        elif suffix in (".odt", ".xlsx", ".xlsm", ".pptx", ".epub"):
+        elif suffix in (".odt", ".docx", ".docm", ".xlsx", ".xlsm", ".pptx", ".pptm"):
             text = office_xml_text(path, suffix)
         elif suffix in IMAGE_TYPES:
             metadata = image_description(path)
@@ -255,11 +360,11 @@ def file_kind(suffix: str) -> str:
     suffix = (suffix or "").lower()
     if suffix in IMAGE_TYPES:
         return "תמונה"
-    if suffix in (".xlsx", ".xlsm"):
+    if suffix in EXCEL_TYPES:
         return "גיליון"
-    if suffix == ".pptx":
+    if suffix in PRESENTATION_TYPES:
         return "מצגת"
-    if suffix == ".epub":
+    if suffix in EBOOK_TYPES:
         return "ספר דיגיטלי"
     if suffix == ".zip":
         return "ארכיון"
@@ -634,7 +739,7 @@ class App:
         self.show_viewer(path, row["title"], row["content"])
 
     def show_viewer(self, path: Path, title: str, content: str = ""):
-        """Open supported files inside the application, never in an external viewer."""
+        """Show files inside the application; Office files are converted headlessly to PDF."""
         window = tk.Toplevel(self.root)
         window.title(title)
         window.geometry("1080x800")
@@ -646,53 +751,173 @@ class App:
         ttk.Label(header, text=title, style="Header.TLabel", anchor="e").pack(fill="x")
         body = ttk.Frame(window, padding=10, style="App.TFrame")
         body.pack(fill="both", expand=True)
-        suffix = path.suffix.lower()
 
+        suffix = path.suffix.lower()
+        preview_path = path
+        temporary_directory = None
+        notice = ""
+        if suffix in OFFICE_TYPES:
+            preview_path, temporary_directory, notice = convert_office_to_pdf(path)
+
+        preview_document = None
         if suffix in IMAGE_TYPES and Image is not None:
             self._show_image_in_viewer(body, path)
-        elif suffix == ".pdf" and fitz is not None and Image is not None:
-            try:
-                doc = fitz.open(path)
-                canvas = tk.Canvas(body, background="#E8EDF3", highlightthickness=0)
-                scrollbar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
-                inner = ttk.Frame(canvas)
-                inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-                canvas.create_window((0, 0), window=inner, anchor="nw")
-                canvas.configure(yscrollcommand=scrollbar.set)
-                canvas.pack(side="right", fill="both", expand=True)
-                scrollbar.pack(side="left", fill="y")
-                for number, page in enumerate(doc, 1):
-                    pix = page.get_pixmap(matrix=fitz.Matrix(1.35, 1.35), alpha=False)
-                    import io
-                    image = Image.open(io.BytesIO(pix.tobytes("png")))
-                    image.thumbnail((900, 1200))
-                    photo = ImageTk.PhotoImage(image.copy())
-                    label = ttk.Label(inner, image=photo)
-                    label.image = photo
-                    label.pack(pady=8)
-                    ttk.Label(inner, text=f"עמוד {number}").pack()
-            except Exception as exc:
-                ttk.Label(body, text=f"לא ניתן להציג את קובץ ה-PDF: {exc}").pack()
+        elif (suffix == ".pdf" or suffix in EBOOK_TYPES or preview_path != path) and fitz is not None and Image is not None:
+            preview_document = self._show_pdf_in_viewer(body, preview_path, window)
         else:
+            if notice:
+                ttk.Label(
+                    body,
+                    text=notice,
+                    foreground="#9A4B18",
+                    background="#FFF4E5",
+                    padding=10,
+                    wraplength=950,
+                    justify="right",
+                ).pack(fill="x", pady=(0, 8))
             text = content or extract_text(path)
             if not text:
-                text = "אין אפשרות להציג תצוגה פנימית לתוכן הקובץ הזה. אפשר לשמור אותו בספרייה, אך פורמט זה אינו מפוענח כרגע."
-            text_frame = ttk.Frame(body)
-            text_frame.pack(fill="both", expand=True)
-            viewer = tk.Text(
-                text_frame, wrap="word", font=("Segoe UI", 12), padx=18, pady=16,
-                background="#FFFFFF", foreground=self.colors["text"],
-                insertbackground=self.colors["accent"], relief="flat",
-                highlightthickness=1, highlightbackground=self.colors["border"]
-            )
-            scroll = ttk.Scrollbar(text_frame, orient="vertical", command=viewer.yview)
-            viewer.configure(yscrollcommand=scroll.set)
-            viewer.pack(side="right", fill="both", expand=True)
-            scroll.pack(side="left", fill="y")
-            viewer.insert("1.0", text)
-            viewer.tag_configure("rtl", justify="right")
-            viewer.tag_add("rtl", "1.0", "end")
-            viewer.configure(state="disabled")
+                text = "לא ניתן להציג כרגע תצוגה חזותית לקובץ הזה. הקובץ נשאר שמור בספרייה."
+            self._show_text_in_viewer(body, text)
+
+        def close_preview():
+            try:
+                if preview_document is not None:
+                    preview_document.close()
+            except Exception:
+                pass
+            if temporary_directory is not None:
+                shutil.rmtree(temporary_directory, ignore_errors=True)
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", close_preview)
+
+    def _show_text_in_viewer(self, parent, text: str):
+        text_frame = ttk.Frame(parent)
+        text_frame.pack(fill="both", expand=True)
+        viewer = tk.Text(
+            text_frame, wrap="word", font=("Segoe UI", 12), padx=18, pady=16,
+            background="#FFFFFF", foreground=self.colors["text"],
+            insertbackground=self.colors["accent"], relief="flat",
+            highlightthickness=1, highlightbackground=self.colors["border"]
+        )
+        scroll = ttk.Scrollbar(text_frame, orient="vertical", command=viewer.yview)
+        viewer.configure(yscrollcommand=scroll.set)
+        viewer.pack(side="right", fill="both", expand=True)
+        scroll.pack(side="left", fill="y")
+        viewer.insert("1.0", text)
+        viewer.tag_configure("rtl", justify="right")
+        viewer.tag_add("rtl", "1.0", "end")
+        viewer.configure(state="disabled")
+
+    def _show_pdf_in_viewer(self, parent, path: Path, window):
+        """Render PDF/ebook pages lazily so large books do not exhaust memory."""
+        if fitz is None or Image is None or ImageTk is None:
+            ttk.Label(parent, text="רכיב תצוגת העמודים אינו זמין במחשב זה.").pack(pady=20)
+            return None
+
+        import io
+
+        try:
+            document = fitz.open(path)
+            if document.page_count < 1:
+                raise ValueError("המסמך אינו מכיל עמודים.")
+
+            canvas = tk.Canvas(parent, background="#E8EDF3", highlightthickness=0)
+            scrollbar = ttk.Scrollbar(parent, orient="vertical")
+            inner = ttk.Frame(canvas)
+            inner.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+            canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            scrollbar.configure(command=canvas.yview)
+            canvas.pack(side="right", fill="both", expand=True)
+            scrollbar.pack(side="left", fill="y")
+
+            page_frames = []
+            for number, page in enumerate(document, 1):
+                page_width = max(1.0, float(page.rect.width))
+                page_height = max(1.0, float(page.rect.height))
+                scale = min(1.15, 900.0 / page_width)
+                frame_height = int(page_height * scale) + 36
+                frame = ttk.Frame(inner, width=930, height=frame_height, style="Panel.TFrame")
+                frame.pack(fill="x", padx=8, pady=7)
+                frame.pack_propagate(False)
+                ttk.Label(frame, text=f"טעינת עמוד {number}…", style="Panel.TLabel").pack(expand=True)
+                page_frames.append((frame, scale, frame_height))
+
+            state = {"scheduled": False, "photos": {}}
+
+            def schedule_render(_event=None):
+                if not state["scheduled"]:
+                    state["scheduled"] = True
+                    window.after_idle(render_visible_pages)
+
+            def render_visible_pages():
+                state["scheduled"] = False
+                try:
+                    inner.update_idletasks()
+                    bounds = canvas.bbox("all")
+                    if not bounds:
+                        return
+                    visible_top = canvas.canvasy(0)
+                    visible_bottom = canvas.canvasy(max(1, canvas.winfo_height()))
+                    wanted = set()
+                    for index, (frame, _scale, frame_height) in enumerate(page_frames):
+                        top = frame.winfo_y()
+                        bottom = top + frame_height
+                        if bottom >= visible_top - 1100 and top <= visible_bottom + 1100:
+                            wanted.add(index)
+
+                    for index in sorted(wanted):
+                        if index in state["photos"]:
+                            continue
+                        frame, scale, _height = page_frames[index]
+                        try:
+                            pixmap = document[index].get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                            image = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
+                            photo = ImageTk.PhotoImage(image)
+                            for child in frame.winfo_children():
+                                child.destroy()
+                            image_label = ttk.Label(frame, image=photo, style="Panel.TLabel")
+                            image_label.image = photo
+                            image_label.pack(expand=True)
+                            state["photos"][index] = photo
+                        except Exception as page_error:
+                            for child in frame.winfo_children():
+                                child.destroy()
+                            ttk.Label(
+                                frame,
+                                text=f"לא ניתן לטעון את עמוד {index + 1}: {page_error}",
+                                style="Panel.TLabel",
+                                wraplength=850,
+                            ).pack(expand=True)
+                    # Keep only nearby pages in memory. Distant pages are redrawn when revisited.
+                    keep = set()
+                    for index in wanted:
+                        keep.update(range(max(0, index - 1), min(len(page_frames), index + 2)))
+                    for index in list(state["photos"]):
+                        if index not in keep:
+                            frame = page_frames[index][0]
+                            for child in frame.winfo_children():
+                                child.destroy()
+                            ttk.Label(frame, text=f"עמוד {index + 1} — גלילה לטעינה", style="Panel.TLabel").pack(expand=True)
+                            state["photos"].pop(index, None)
+                except tk.TclError:
+                    return
+
+            def on_scroll(*args):
+                scrollbar.set(*args)
+                schedule_render()
+
+            scrollbar.configure(command=lambda *args: (canvas.yview(*args), schedule_render()))
+            canvas.configure(yscrollcommand=on_scroll)
+            canvas.bind("<Configure>", schedule_render)
+            inner.bind("<Configure>", lambda _event: (canvas.configure(scrollregion=canvas.bbox("all")), schedule_render()))
+            window.after_idle(schedule_render)
+            return document
+        except Exception as exc:
+            ttk.Label(parent, text=f"לא ניתן להציג את המסמך: {exc}", wraplength=900).pack(pady=20)
+            return None
 
     def _show_image_in_viewer(self, parent, path: Path):
         try:
