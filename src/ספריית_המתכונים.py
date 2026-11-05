@@ -56,7 +56,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 TEXT_TYPES = {".txt", ".md", ".csv", ".tsv", ".log"}
 WORD_TYPES = {".doc", ".docx", ".docm", ".odt", ".rtf"}
@@ -643,7 +643,7 @@ class RecipeLibrary:
             elif key in existing:
                 clean[key] = existing[key]
             else:
-                clean[key] = [] if key in ("history", "versions") else ""
+                clean[key] = [] if key in ("history", "versions") else (None if key == "is_recipe" else "")
         self.db.execute(
             "UPDATE items SET recipe_data=? WHERE id=?",
             (json.dumps(clean, ensure_ascii=False), int(item_id))
@@ -955,7 +955,7 @@ class RecipeLibrary:
         if not row:
             return
         old = Path(row["stored_path"])
-        new = unique_path(self.files_dir, title, old.suffix)
+        new = unique_path(old.parent, title, old.suffix)
         old.rename(new)
         self.db.execute("UPDATE items SET title=?,stored_path=? WHERE id=?", (safe_title(title), str(new), item_id))
         self.db.commit()
@@ -1198,7 +1198,7 @@ class App:
         self.sort_combo = ttk.Combobox(
             filter_frame, textvariable=self.sort_value,
             state="readonly", width=18, justify="right",
-            values=["תאריך: חדש לישן", "תאריך: ישן לחדש", "שם: א-ת", "שם: ת-א", "סוג קובץ", "גודל: גדול לקטן", "נצפו לאחרונה"]
+            values=["תאריך: חדש לישן", "תאריך: ישן לחדש", "שם: א-ת", "שם: ת-א", "סוג קובץ", "גודל: גדול לקטן", "דירוג: גבוה לנמוך", "נצפו לאחרונה"]
         )
         self.sort_combo.pack(side="right", padx=4)
         self.sort_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
@@ -1540,6 +1540,12 @@ class App:
             ranked.sort(key=lambda x: (file_kind(x[1]["extension"]), x[1]["title"].casefold()))
         elif sort_mode == "גודל: גדול לקטן":
             ranked.sort(key=lambda x: x[2], reverse=True)
+        elif sort_mode == "דירוג: גבוה לנמוך":
+            ranked.sort(
+                key=lambda x: int(self.library.get_recipe_data(x[1]["id"]).get("rating") or 0)
+                if str(self.library.get_recipe_data(x[1]["id"]).get("rating") or "0").isdigit() else 0,
+                reverse=True
+            )
         elif sort_mode == "נצפו לאחרונה":
             ranked.sort(key=lambda x: x[1]["last_opened"] or "", reverse=True)
         elif query:
