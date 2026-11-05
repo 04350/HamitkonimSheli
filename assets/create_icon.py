@@ -24,8 +24,8 @@ image.putalpha(mask)
 draw = ImageDraw.Draw(image)
 
 # Soft decorative glows.
-draw.ellipse((600, -180, 1160, 380), fill=(70, 166, 171, 42))
-draw.ellipse((-220, 600, 360, 1180), fill=(38, 126, 157, 30))
+draw.ellipse((600, -180, 1160, 380), fill=(34, 91, 125, 255))
+draw.ellipse((-220, 600, 360, 1180), fill=(18, 65, 94, 255))
 
 # Steam curls above the pot.
 def bezier(p0, p1, p2, p3, count=50):
