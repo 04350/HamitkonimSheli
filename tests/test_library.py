@@ -191,7 +191,7 @@ class בדיקותספרייה(unittest.TestCase):
                 library.set_item_collection(item_id, shabbat_id, True)
 
                 self.assertEqual(library.item_collection_ids(item_id), {desserts_id, shabbat_id})
-                self.assertEqual(library.item_collection_names(item_id), ["שבת", "קינוחים"])
+                self.assertEqual(library.item_collection_names(item_id), ["קינוחים", "שבת"])
                 self.assertEqual(len(library.rows(favorite_only=True)), 1)
                 self.assertEqual(len(library.rows(collection_id=desserts_id)), 1)
                 with self.assertRaises(ValueError):
