@@ -463,15 +463,20 @@ def scale_ingredient_amounts(text: str, base_servings: int, target_servings: int
 
 
 def text_similarity(left: str, right: str) -> float:
+    # Token-set overlap is intentionally used here instead of a full edit-distance
+    # calculation; duplicate scans can compare thousands of pairs.
     a = normalize((left or "")[:3500])
     b = normalize((right or "")[:3500])
     if not a or not b:
         return 0.0
     a_words, b_words = set(a.split()), set(b.split())
     union = a_words | b_words
-    overlap = len(a_words & b_words) / len(union) if union else 0.0
-    sequence = SequenceMatcher(None, a[:1800], b[:1800]).ratio()
-    return max(overlap, sequence * 0.85)
+    word_score = len(a_words & b_words) / len(union) if union else 0.0
+    a_pairs = set(zip(a.split(), a.split()[1:]))
+    b_pairs = set(zip(b.split(), b.split()[1:]))
+    pair_union = a_pairs | b_pairs
+    pair_score = len(a_pairs & b_pairs) / len(pair_union) if pair_union else 0.0
+    return max(word_score, pair_score)
 
 
 class RecipeLibrary:
@@ -1860,7 +1865,7 @@ class App:
             messagebox.showinfo("בדיקת כפילויות", "נדרשים לפחות שני קבצים בספרייה.")
             return
         # Avoid quadratic work on extremely large libraries; compare the newest 700 items.
-        rows = rows[:700]
+        rows = rows[:350]
         found = []
         for index, first in enumerate(rows):
             first_title = normalize(first["title"])
@@ -1973,10 +1978,18 @@ class App:
         ):
             return
         try:
+            safety_backup = self.library.backup_dir / (
+                "גיבוי-בטיחות-לפני-שחזור-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".zip"
+            )
+            self.library.create_backup(safety_backup)
             count = self.library.restore_backup(Path(source))
             self.refresh()
-            messagebox.showinfo("השחזור הושלם", f"הספרייה שוחזרה בהצלחה. נטענו {count} רשומות.")
-            self.status_value.set("הספרייה שוחזרה מגיבוי.")
+            messagebox.showinfo(
+                "השחזור הושלם",
+                f"הספרייה שוחזרה בהצלחה. נטענו {count} רשומות.\n"
+                f"גיבוי בטיחות של הספרייה הקודמת נשמר כאן:\n{safety_backup}"
+            )
+            self.status_value.set("הספרייה שוחזרה מגיבוי. גיבוי בטיחות של המצב הקודם נשמר.")
         except Exception as exc:
             messagebox.showerror("שחזור נכשל", f"הספרייה הנוכחית נשמרה ככל האפשר.\n{exc}")
 
