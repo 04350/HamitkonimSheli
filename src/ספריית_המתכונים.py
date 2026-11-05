@@ -1295,6 +1295,7 @@ class App:
 
     def _bind_gallery_click(self, widget, item_id):
         widget.bind("<Button-1>", lambda _event, value=item_id: self._select_gallery_item(value))
+        widget.bind("<Double-Button-1>", lambda _event, value=item_id: (self._select_gallery_item(value), self.open_selected()))
         for child in widget.winfo_children():
             self._bind_gallery_click(child, item_id)
 
