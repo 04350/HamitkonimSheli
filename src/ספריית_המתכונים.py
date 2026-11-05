@@ -1908,6 +1908,49 @@ class App:
         finally:
             self._auto_backup_job = self.root.after(6 * 60 * 60 * 1000, self._maybe_auto_backup)
 
+    def manage_multiple_items(self):
+        if self.view_mode.get() != "רשימה":
+            messagebox.showinfo("ניהול מרובה", "עברו לתצוגת רשימה כדי לבחור כמה פריטים בעזרת Ctrl או Shift.")
+            return
+        selected = list(self.tree.selection())
+        if not selected:
+            messagebox.showinfo("ניהול מרובה", "סמנו כמה מתכונים או קבצים ברשימה, ואז לחצו שוב.")
+            return
+        category = simpledialog.askstring(
+            "שינוי קטגוריה לקבוצה",
+            f"נבחרו {len(selected)} פריטים. הזינו קטגוריה חדשה. השארת השדה ריק תשאיר את הקטגוריות הקיימות.",
+            parent=self.root
+        )
+        if category is None:
+            return
+        tags = simpledialog.askstring(
+            "שינוי תגיות לקבוצה",
+            "הזינו תגיות מופרדות בפסיקים. השארת השדה ריק תשאיר את התגיות הקיימות.",
+            parent=self.root
+        )
+        if tags is None:
+            return
+        category = category.strip()
+        tag_names = [part.strip() for part in tags.split(",") if part.strip()]
+        if not category and not tag_names:
+            messagebox.showinfo("ניהול מרובה", "לא הוזנו שינויים.")
+            return
+        changed = 0
+        for item in selected:
+            try:
+                item_id = int(item)
+                data = self.library.get_recipe_data(item_id)
+                if category:
+                    data["category"] = category
+                self.library.set_recipe_data(item_id, data)
+                if tag_names:
+                    self.library.set_item_tags(item_id, tag_names)
+                changed += 1
+            except Exception:
+                continue
+        self.refresh()
+        self.status_value.set(f"העדכון הקבוצתי הושלם עבור {changed} פריטים.")
+
     def edit_recipe(self):
         row = self.selected_row()
         if not row:
@@ -1941,6 +1984,7 @@ class App:
             ("prep_minutes", "זמן הכנה בדקות", str(data.get("prep_minutes", "")), 10),
             ("cook_minutes", "זמן בישול בדקות", str(data.get("cook_minutes", "")), 10),
             ("servings", "מספר מנות", str(data.get("servings", "4") or "4"), 8),
+            ("rating", "דירוג אישי (0–5)", str(data.get("rating", "") or ""), 8),
         ]
         for key, label, value, width in fields:
             cell = ttk.Frame(top, style="Card.TFrame")
@@ -1955,6 +1999,9 @@ class App:
         ttk.Label(tags_frame, text="תגיות אישיות (הפרידו בפסיקים)", style="Muted.TLabel").pack(anchor="e")
         tags_var = tk.StringVar(value=", ".join(tags))
         ttk.Entry(tags_frame, textvariable=tags_var, justify="right").pack(fill="x", pady=(4, 0))
+        recipe_flag = tk.BooleanVar(value=is_recipe_record(data, row["content"] or ""))
+        ttk.Checkbutton(tags_frame, text="זהו מתכון (ולא מסמך או קובץ כללי)", variable=recipe_flag).pack(anchor="e", pady=(7, 0))
+        ttk.Label(tags_frame, text=f"תיקיית מקור: {data.get('source_folder') or 'שורש הספרייה'}", style="Muted.TLabel").pack(anchor="e", pady=(4, 0))
 
         def add_text_section(parent, title, initial, height):
             frame = ttk.Frame(parent, padding=10, style="Card.TFrame")
@@ -1987,6 +2034,23 @@ class App:
                 ingredients_text.insert("1.0", extract_ingredients(content))
             )
         ).pack(side="right")
+
+        def smart_import_recipe():
+            parsed = parse_recipe_text(content)
+            if parsed.get("ingredients"):
+                ingredients_text.delete("1.0", "end")
+                ingredients_text.insert("1.0", parsed["ingredients"])
+            if parsed.get("instructions"):
+                instructions_text.delete("1.0", "end")
+                instructions_text.insert("1.0", parsed["instructions"])
+            messagebox.showinfo(
+                "ייבוא חכם",
+                "הטקסט נותח. בדקו את המצרכים וההוראות לפני השמירה."
+                if parsed.get("is_recipe") else
+                "לא זוהו בביטחון כותרות של מצרכים והוראות. הטקסט המקורי נשאר שמור.",
+                parent=window
+            )
+        ttk.Button(tools, text="ייבוא חכם של המתכון", command=smart_import_recipe).pack(side="left")
 
         instructions_frame, instructions_text = add_text_section(
             outer, "הוראות הכנה", data.get("instructions", ""), 8
@@ -2030,6 +2094,53 @@ class App:
         buttons = ttk.Frame(outer, style="App.TFrame")
         buttons.pack(fill="x", pady=(12, 0))
 
+        def save_recipe_version():
+            label = simpledialog.askstring("שמירת גרסה", "שם לגרסה החדשה (למשל: כמות כפולה או פחות סוכר):", parent=window)
+            if not label or not label.strip():
+                return
+            current = self.library.get_recipe_data(item_id)
+            versions = list(current.get("versions") or [])
+            versions.append({
+                "label": label.strip(),
+                "saved_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                "ingredients": ingredients_text.get("1.0", "end-1c").strip(),
+                "instructions": instructions_text.get("1.0", "end-1c").strip(),
+                "servings": variables["servings"].get().strip(),
+            })
+            current["versions"] = versions[-30:]
+            self.library.set_recipe_data(item_id, current)
+            messagebox.showinfo("שמירת גרסה", "הגרסה נשמרה בנפרד. המתכון הראשי לא הוחלף.", parent=window)
+
+        def compare_recipe_versions():
+            versions = list(self.library.get_recipe_data(item_id).get("versions") or [])
+            if not versions:
+                messagebox.showinfo("השוואת גרסאות", "עדיין לא נשמרו גרסאות למתכון.", parent=window)
+                return
+            labels = [f"{index + 1}. {item.get('label','גרסה')} · {item.get('saved_at','')}" for index, item in enumerate(versions)]
+            choice = simpledialog.askinteger("השוואת גרסאות", "בחרו את מספר הגרסה להשוואה:\n" + "\n".join(labels), parent=window, minvalue=1, maxvalue=len(versions))
+            if not choice:
+                return
+            version = versions[choice - 1]
+            comparison = (
+                f"גרסה שמורה: {version.get('label','')} · {version.get('saved_at','')}\n\n"
+                "מצרכים – הגרסה השמורה:\n" + str(version.get("ingredients") or "") + "\n\n"
+                "מצרכים – הגרסה הנוכחית בחלון:\n" + ingredients_text.get("1.0", "end-1c").strip() + "\n\n"
+                "הוראות – הגרסה השמורה:\n" + str(version.get("instructions") or "") + "\n\n"
+                "הוראות – הגרסה הנוכחית בחלון:\n" + instructions_text.get("1.0", "end-1c").strip()
+            )
+            result = tk.Toplevel(window)
+            result.title("השוואת גרסאות")
+            result.geometry("760x650")
+            text_area = tk.Text(result, wrap="word", font=("Segoe UI", 10), padx=12, pady=12)
+            text_area.pack(fill="both", expand=True)
+            text_area.insert("1.0", comparison)
+            text_area.tag_configure("rtl", justify="right")
+            text_area.tag_add("rtl", "1.0", "end")
+            text_area.configure(state="disabled")
+
+        ttk.Button(buttons, text="שמירת גרסה נפרדת", command=save_recipe_version).pack(side="right", padx=3)
+        ttk.Button(buttons, text="השוואת גרסאות", command=compare_recipe_versions).pack(side="right", padx=3)
+
         def save_recipe():
             try:
                 for key in ("prep_minutes", "cook_minutes", "servings"):
@@ -2038,6 +2149,9 @@ class App:
                         raise ValueError("זמני הכנה, בישול ומספר מנות חייבים להיות מספרים חיוביים.")
                 if variables["servings"].get().strip() and int(variables["servings"].get()) < 1:
                     raise ValueError("מספר המנות חייב להיות לפחות 1.")
+                rating = variables["rating"].get().strip()
+                if rating and (not rating.isdigit() or not 0 <= int(rating) <= 5):
+                    raise ValueError("הדירוג האישי חייב להיות מספר בין 0 ל־5.")
                 recipe = {
                     "category": variables["category"].get().strip(),
                     "prep_minutes": variables["prep_minutes"].get().strip(),
@@ -2046,6 +2160,8 @@ class App:
                     "ingredients": ingredients_text.get("1.0", "end-1c").strip(),
                     "instructions": instructions_text.get("1.0", "end-1c").strip(),
                     "notes": notes_text.get("1.0", "end-1c").strip(),
+                    "rating": rating,
+                    "is_recipe": bool(recipe_flag.get()),
                 }
                 self.library.set_recipe_data(item_id, recipe)
                 self.library.set_item_tags(item_id, tags_var.get().split(","))
