@@ -2002,6 +2002,22 @@ class App:
         recipe_flag = tk.BooleanVar(value=is_recipe_record(data, row["content"] or ""))
         ttk.Checkbutton(tags_frame, text="זהו מתכון (ולא מסמך או קובץ כללי)", variable=recipe_flag).pack(anchor="e", pady=(7, 0))
         ttk.Label(tags_frame, text=f"תיקיית מקור: {data.get('source_folder') or 'שורש הספרייה'}", style="Muted.TLabel").pack(anchor="e", pady=(4, 0))
+        image_path_var = tk.StringVar(value=str(data.get("image_path") or (row["stored_path"] if row["extension"] in IMAGE_TYPES else "")))
+        image_source_var = tk.StringVar(value="")
+        image_frame = ttk.Frame(outer, padding=9, style="Card.TFrame")
+        image_frame.pack(fill="x", pady=(8, 0))
+        ttk.Label(image_frame, text="תמונה מייצגת למתכון", style="Panel.TLabel").pack(side="right", padx=(0, 8))
+        image_label = ttk.Label(image_frame, text=Path(image_path_var.get()).name if image_path_var.get() else "לא נבחרה תמונה", style="Muted.TLabel")
+        image_label.pack(side="right", padx=8)
+        def choose_recipe_image():
+            selected_image = filedialog.askopenfilename(
+                parent=window, title="בחירת תמונה למתכון",
+                filetypes=[("תמונות", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp")]
+            )
+            if selected_image:
+                image_source_var.set(selected_image)
+                image_label.configure(text=Path(selected_image).name)
+        ttk.Button(image_frame, text="בחירת תמונה…", command=choose_recipe_image).pack(side="left")
 
         def add_text_section(parent, title, initial, height):
             frame = ttk.Frame(parent, padding=10, style="Card.TFrame")
@@ -2162,7 +2178,19 @@ class App:
                     "notes": notes_text.get("1.0", "end-1c").strip(),
                     "rating": rating,
                     "is_recipe": bool(recipe_flag.get()),
+                    "image_path": image_path_var.get().strip(),
                 }
+                if image_source_var.get().strip():
+                    selected_image = Path(image_source_var.get())
+                    try:
+                        selected_image.resolve().relative_to(self.library.files_dir.resolve())
+                        stored_image = selected_image
+                    except ValueError:
+                        image_folder = self.library.files_dir / "תמונות מתכונים"
+                        image_folder.mkdir(parents=True, exist_ok=True)
+                        stored_image = unique_path(image_folder, f"{item_id}-{safe_title(row['title'])}", selected_image.suffix.lower())
+                        shutil.copy2(selected_image, stored_image)
+                    recipe["image_path"] = str(stored_image)
                 self.library.set_recipe_data(item_id, recipe)
                 self.library.set_item_tags(item_id, tags_var.get().split(","))
                 self.refresh()
