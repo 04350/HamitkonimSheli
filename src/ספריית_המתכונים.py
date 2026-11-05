@@ -917,7 +917,7 @@ class RecipeLibrary:
         target = unique_path(target_folder, title, source.suffix.lower())
         parsed = parse_recipe_text(content)
         recipe_data = {
-            "category": "",
+            "category": "/".join(safe_parts),
             "ingredients": parsed.get("ingredients", ""),
             "instructions": parsed.get("instructions", ""),
             "prep_minutes": "",
@@ -1975,12 +1975,17 @@ class App:
 
         outer = ttk.Frame(window, padding=18, style="App.TFrame")
         outer.pack(fill="both", expand=True)
-        ttk.Label(outer, text=row["title"], style="Section.TLabel").pack(fill="x", anchor="e")
+        ttk.Label(outer, text="פרטי המתכון", style="Section.TLabel").pack(fill="x", anchor="e")
+        title_frame = ttk.Frame(outer, padding=10, style="Card.TFrame")
+        title_frame.pack(fill="x", pady=(6, 0))
+        ttk.Label(title_frame, text="שם המתכון", style="Muted.TLabel").pack(anchor="e")
+        title_var = tk.StringVar(value=row["title"])
+        ttk.Entry(title_frame, textvariable=title_var, justify="right").pack(fill="x", pady=(3, 0))
         ttk.Label(
             outer,
             text="שמרו את פרטי המתכון, המצרכים, הוראות ההכנה והתגיות האישיות.",
             style="Muted.TLabel"
-        ).pack(fill="x", pady=(3, 12))
+        ).pack(fill="x", pady=(3, 8))
 
         top = ttk.Frame(outer, padding=12, style="Card.TFrame")
         top.pack(fill="x")
@@ -2059,6 +2064,8 @@ class App:
 
         def smart_import_recipe():
             parsed = parse_recipe_text(content)
+            if parsed.get("title"):
+                title_var.set(parsed["title"])
             if parsed.get("ingredients"):
                 ingredients_text.delete("1.0", "end")
                 ingredients_text.insert("1.0", parsed["ingredients"])
@@ -2197,6 +2204,9 @@ class App:
                         stored_image = unique_path(image_folder, f"{item_id}-{safe_title(row['title'])}", selected_image.suffix.lower())
                         shutil.copy2(selected_image, stored_image)
                     recipe["image_path"] = str(stored_image)
+                new_title = safe_title(title_var.get().strip())
+                if new_title and new_title != row["title"]:
+                    self.library.rename(item_id, new_title)
                 self.library.set_recipe_data(item_id, recipe)
                 self.library.set_item_tags(item_id, tags_var.get().split(","))
                 self.refresh()
