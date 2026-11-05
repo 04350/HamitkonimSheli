@@ -372,5 +372,77 @@ class בדיקותספרייה(unittest.TestCase):
         second = "עוגת תפוחים קינמון: מערבבים קמח, ביצים, תפוחים וסוכר ואופים בתנור."
         self.assertGreater(app.text_similarity(first, second), 0.55)
 
+
+    def test_חיפוש_כולל_מצרכים_והוראות_הכנה(self):
+        blob = app.recipe_search_text(
+            "עוגה פשוטה", "",
+            {"ingredients": "2 כוסות קמח", "instructions": "מערבבים ואופים"},
+            ["חלבי"]
+        )
+        self.assertGreater(app.relevance("עוגה פשוטה", blob, "כוסות קמח"), 0)
+        self.assertGreater(app.relevance("עוגה פשוטה", blob, "מערבבים"), 0)
+
+    def test_רשימת_קניות_מאחדת_רק_שורות_זהות(self):
+        result = app.compile_shopping_list([
+            {"ingredients": "2 כוסות קמח\n1 כף מלח"},
+            {"ingredients": "2 כוסות קמח\n2 כפות מלח"},
+        ])
+        self.assertEqual(result.count("2 כוסות קמח"), 1)
+        self.assertIn("1 כף מלח", result)
+        self.assertIn("2 כפות מלח", result)
+
+    def test_יצירת_חוברת_word_בעברית_ובכיווניות_rtl(self):
+        if app.Document is None:
+            self.skipTest("נדרשת ספריית python-docx")
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "חוברת.docx"
+            app.build_recipe_book_docx([
+                {
+                    "title": "עוגת תפוחים",
+                    "ingredients": "2 כוסות קמח\n3 תפוחים",
+                    "instructions": "מערבבים את החומרים\nאופים בתנור",
+                    "notes": "להגיש קר",
+                    "servings": "8",
+                }
+            ], "המתכונים שלי", target)
+            self.assertTrue(target.is_file())
+            document = app.Document(str(target))
+            text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+            self.assertIn("עוגת תפוחים", text)
+            self.assertIn("2 כוסות קמח", text)
+            self.assertIn("הוראות הכנה", text)
+            self.assertIn("הערות אישיות", text)
+            self.assertIn("w:bidi", document.paragraphs[1]._p.xml)
+
+    @unittest.skipUnless(
+        app.find_libreoffice() is not None and app.fitz is not None,
+        "נדרשים LibreOffice ו-PyMuPDF (כלולים בחבילת Windows המלאה)"
+    )
+    def test_יצירת_חוברת_pdf_עם_כמה_מתכונים(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "חוברת.pdf"
+            recipes = [
+                {
+                    "title": "עוגת תפוחים",
+                    "ingredients": "2 כוסות קמח\n3 תפוחים",
+                    "instructions": "מערבבים\nאופים",
+                },
+                {
+                    "title": "מרק ירקות",
+                    "ingredients": "2 גזרים\n1 תפוח אדמה",
+                    "instructions": "חותכים\nמבשלים",
+                },
+            ]
+            result = app.export_recipe_book_pdf(
+                recipes, "החוברת המשפחתית", target, app.convert_office_to_pdf
+            )
+            self.assertTrue(result.is_file())
+            self.assertGreater(result.stat().st_size, 100)
+            with app.fitz.open(result) as pdf:
+                self.assertGreaterEqual(pdf.page_count, 2)
+                extracted = "\n".join(page.get_text() for page in pdf)
+                self.assertIn("עוגת תפוחים", extracted)
+                self.assertIn("מרק ירקות", extracted)
+
 if __name__ == "__main__":
     unittest.main()
