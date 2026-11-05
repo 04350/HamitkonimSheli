@@ -473,13 +473,15 @@ class App:
         self.library = RecipeLibrary()
         self.root = ROOT_CLASS()
         self.root.title(APP_NAME)
-        self.root.geometry("1180x760")
-        self.root.minsize(900, 580)
+        self.root.geometry("1400x880")
+        self.root.minsize(1080, 700)
         self.style = ttk.Style(self.root)
         self._apply_styles()
         self.search_value = tk.StringVar()
         self.status_value = tk.StringVar(value="ברוכים הבאים! אפשר להוסיף קבצים או לגרור אותם לחלון.")
         self.preview_photo = None
+        self.preview_path = None
+        self._preview_resize_job = None
         self.current_rows = {}
         self._build()
         self.refresh()
@@ -492,6 +494,233 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
     def _apply_styles(self):
+        """Apply a modern, high-contrast desktop theme."""
+        self.colors = {
+            "background": "#EEF3F9",
+            "surface": "#FFFFFF",
+            "navy": "#172A45",
+            "hero": "#10243D",
+            "text": "#25364D",
+            "muted": "#718198",
+            "border": "#DCE5EF",
+            "accent": "#087E8B",
+            "accent_hover": "#066571",
+            "soft": "#E6F3F5",
+            "row_alt": "#F5F8FC",
+            "selected": "#DCEFF2",
+            "danger": "#B83E4B",
+        }
+        try:
+            self.style.theme_use("clam")
+        except Exception:
+            pass
+
+        c = self.colors
+        self.root.configure(background=c["background"])
+        self.style.configure(".", font=("Segoe UI", 10), foreground=c["text"])
+        self.style.configure("App.TFrame", background=c["background"])
+        self.style.configure("Card.TFrame", background=c["surface"])
+        self.style.configure("Panel.TFrame", background=c["surface"])
+        self.style.configure("Panel.TLabel", background=c["surface"], foreground=c["text"])
+        self.style.configure("Muted.TLabel", background=c["surface"], foreground=c["muted"], font=("Segoe UI", 9))
+        self.style.configure("Section.TLabel", background=c["surface"], foreground=c["navy"], font=("Segoe UI", 14, "bold"))
+        self.style.configure("Status.TLabel", background=c["surface"], foreground=c["muted"], padding=(12, 8), font=("Segoe UI", 9))
+
+        self.style.configure(
+            "Card.TLabelframe", background=c["surface"],
+            bordercolor=c["border"], borderwidth=1, relief="solid", padding=14
+        )
+        self.style.configure(
+            "Card.TLabelframe.Label", background=c["surface"],
+            foreground=c["navy"], font=("Segoe UI", 12, "bold")
+        )
+        self.style.configure(
+            "TButton", font=("Segoe UI", 9, "bold"), padding=(14, 10),
+            background="#E8EEF5", foreground=c["navy"],
+            bordercolor=c["border"], focuscolor=c["accent"], relief="flat"
+        )
+        self.style.map(
+            "TButton",
+            background=[("disabled", "#EEF2F6"), ("pressed", "#D7E2EC"), ("active", "#DCE7F0")],
+            foreground=[("disabled", "#9AA7B5"), ("active", c["navy"])]
+        )
+        self.style.configure(
+            "Primary.TButton", background=c["accent"], foreground="#FFFFFF",
+            bordercolor=c["accent"], padding=(17, 11)
+        )
+        self.style.map(
+            "Primary.TButton",
+            background=[("disabled", "#A8C7C7"), ("pressed", c["accent_hover"]), ("active", c["accent_hover"])],
+            foreground=[("disabled", "#F5FAFA"), ("!disabled", "#FFFFFF")]
+        )
+        self.style.configure(
+            "Danger.TButton", background="#FCEDEF", foreground=c["danger"],
+            bordercolor="#F3D4D8", padding=(12, 9)
+        )
+        self.style.map("Danger.TButton", background=[("pressed", "#F4D9DD"), ("active", "#F8E4E7")])
+        self.style.configure(
+            "TEntry", fieldbackground=c["surface"], foreground=c["navy"],
+            padding=(12, 11), bordercolor=c["border"], insertcolor=c["navy"],
+            font=("Segoe UI", 11)
+        )
+        self.style.configure(
+            "Treeview", rowheight=42, font=("Segoe UI", 10),
+            background=c["surface"], fieldbackground=c["surface"],
+            foreground=c["text"], bordercolor=c["border"], borderwidth=0
+        )
+        self.style.configure(
+            "Treeview.Heading", font=("Segoe UI", 9, "bold"),
+            background="#EDF2F8", foreground=c["navy"],
+            padding=(12, 13), relief="flat"
+        )
+        self.style.map(
+            "Treeview", background=[("selected", c["selected"])],
+            foreground=[("selected", c["navy"])]
+        )
+        self.style.map("Treeview.Heading", background=[("active", "#DFE9F2")])
+        self.style.configure(
+            "Vertical.TScrollbar", background="#DDE6EF",
+            troughcolor=c["background"], bordercolor=c["background"], arrowsize=15
+        )
+
+    def _build(self):
+        outer = ttk.Frame(self.root, padding=(22, 18, 22, 14), style="App.TFrame")
+        outer.pack(fill="both", expand=True)
+
+        # Hero header
+        hero = tk.Frame(outer, background=self.colors["hero"], height=142, bd=0, highlightthickness=0)
+        hero.pack(fill="x", pady=(0, 15))
+        hero.pack_propagate(False)
+        hero_text = tk.Frame(hero, background=self.colors["hero"])
+        hero_text.pack(side="right", fill="both", expand=True, padx=(24, 28), pady=19)
+        tk.Label(
+            hero_text, text="הספרייה האישית שלך",
+            background=self.colors["hero"], foreground="#9EDBD7",
+            font=("Segoe UI", 10, "bold"), anchor="e"
+        ).pack(fill="x")
+        tk.Label(
+            hero_text, text=APP_NAME,
+            background=self.colors["hero"], foreground="#FFFFFF",
+            font=("Segoe UI", 27, "bold"), anchor="e"
+        ).pack(fill="x", pady=(2, 1))
+        tk.Label(
+            hero_text, text="כל המתכונים, המסמכים והתמונות שלך — מסודרים ונגישים במקום אחד",
+            background=self.colors["hero"], foreground="#C5D2E2",
+            font=("Segoe UI", 10), anchor="e"
+        ).pack(fill="x")
+
+        offline_badge = tk.Frame(hero, background="#1D3A57", highlightbackground="#31536F", highlightthickness=1)
+        offline_badge.pack(side="left", padx=25, pady=34)
+        tk.Label(
+            offline_badge, text="●  עובדת ללא אינטרנט",
+            background="#1D3A57", foreground="#B8F0E7",
+            font=("Segoe UI", 10, "bold"), padx=15, pady=12
+        ).pack()
+        tk.Frame(hero, background=self.colors["accent"], height=4, bd=0).pack(side="bottom", fill="x")
+
+        # Search card
+        search_frame = ttk.Frame(outer, padding=(14, 12), style="Card.TFrame")
+        search_frame.pack(fill="x", pady=(0, 10))
+        ttk.Label(search_frame, text="חיפוש בספרייה", style="Section.TLabel").pack(side="right", padx=(10, 14))
+        entry = ttk.Entry(search_frame, textvariable=self.search_value, justify="right")
+        entry.pack(side="right", fill="x", expand=True, padx=5)
+        entry.bind("<KeyRelease>", lambda _event: self.refresh())
+        ttk.Button(
+            search_frame, text="ניקוי חיפוש",
+            command=lambda: self.search_value.set("") or self.refresh()
+        ).pack(side="left", padx=(5, 0))
+
+        # Main actions
+        toolbar = ttk.Frame(outer, style="App.TFrame")
+        toolbar.pack(fill="x", pady=(0, 12))
+        actions = [
+            ("＋  הוספת קבצים", self.add_files),
+            ("▣  ייבוא תיקייה", self.add_folder),
+            ("▤  פתיחת תיקיית הנתונים", self.open_data_folder),
+            ("↥  יצירת גיבוי", self.backup),
+            ("⚙  הגדרות", self.settings),
+        ]
+        for label, command in actions:
+            style = "Primary.TButton" if label.startswith("＋") else "TButton"
+            ttk.Button(toolbar, text=label, command=command, style=style).pack(side="right", padx=(0, 7))
+
+        # Resizable work area: preview on the left, file list on the right.
+        body = ttk.Frame(outer, style="App.TFrame")
+        body.pack(fill="both", expand=True)
+        paned = tk.PanedWindow(
+            body, orient="horizontal", background=self.colors["background"],
+            sashwidth=8, sashrelief="flat", sashpad=2, bd=0, relief="flat"
+        )
+        paned.pack(fill="both", expand=True)
+
+        preview = ttk.Frame(paned, padding=16, style="Card.TFrame")
+        preview.configure(width=490)
+        ttk.Label(preview, text="תצוגה מקדימה", style="Section.TLabel").pack(anchor="e", fill="x")
+        ttk.Label(
+            preview, text="בחרו תמונה מהרשימה כדי לראות אותה כאן בגודל גדול",
+            style="Muted.TLabel"
+        ).pack(anchor="e", fill="x", pady=(2, 10))
+
+        self.preview_image = tk.Label(
+            preview, text="בחרו תמונה או קובץ מהרשימה\nוהתצוגה תופיע כאן",
+            background="#F2F6FA", foreground=self.colors["muted"],
+            font=("Segoe UI", 12), justify="center", anchor="center",
+            bd=0, highlightthickness=1, highlightbackground="#E3EAF2"
+        )
+        self.preview_image.pack(fill="both", expand=True, pady=(0, 10))
+        self.preview_image.bind("<Configure>", self._schedule_preview_resize)
+
+        self.detail_label = ttk.Label(
+            preview, text="", style="Muted.TLabel",
+            justify="right", anchor="e", wraplength=430
+        )
+        self.detail_label.pack(fill="x", pady=(0, 9))
+        ttk.Button(
+            preview, text="פתיחת הקובץ  ↗", command=self.open_selected,
+            style="Primary.TButton"
+        ).pack(fill="x", pady=(0, 7))
+        preview_actions = ttk.Frame(preview, style="Card.TFrame")
+        preview_actions.pack(fill="x")
+        ttk.Button(preview_actions, text="שינוי שם", command=self.rename_selected).pack(side="right", fill="x", expand=True, padx=(0, 4))
+        ttk.Button(
+            preview_actions, text="הסרה מהספרייה",
+            command=self.delete_selected, style="Danger.TButton"
+        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        table_card = ttk.Frame(paned, padding=14, style="Card.TFrame")
+        table_card.configure(width=790)
+        table_header = ttk.Frame(table_card, style="Card.TFrame")
+        table_header.pack(fill="x", pady=(0, 10))
+        ttk.Label(table_header, text="הקבצים שלך", style="Section.TLabel").pack(side="right")
+        ttk.Label(
+            table_header, text="בחרו פריט כדי להציג פרטים ותצוגה מקדימה",
+            style="Muted.TLabel"
+        ).pack(side="left")
+
+        table_body = ttk.Frame(table_card, style="Card.TFrame")
+        table_body.pack(fill="both", expand=True)
+        columns = ("date", "kind", "title")
+        self.tree = ttk.Treeview(table_body, columns=columns, show="headings", selectmode="browse")
+        self.tree.heading("date", text="תאריך הוספה", anchor="e")
+        self.tree.heading("kind", text="סוג קובץ", anchor="e")
+        self.tree.heading("title", text="שם המתכון או הקובץ", anchor="e")
+        self.tree.column("date", width=145, minwidth=125, anchor="e", stretch=False)
+        self.tree.column("kind", width=115, minwidth=95, anchor="e", stretch=False)
+        self.tree.column("title", width=510, minwidth=230, anchor="e", stretch=True)
+        scroll = ttk.Scrollbar(table_body, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.tag_configure("even", background=self.colors["surface"])
+        self.tree.tag_configure("odd", background=self.colors["row_alt"])
+        self.tree.pack(side="right", fill="both", expand=True)
+        scroll.pack(side="left", fill="y")
+        self.tree.bind("<<TreeviewSelect>>", self.show_selected)
+        self.tree.bind("<Double-1>", lambda _event: self.open_selected())
+
+        status_frame = ttk.Frame(outer, padding=(10, 7), style="Card.TFrame")
+        status_frame.pack(fill="x", pady=(10, 0))
+        ttk.Label(status_frame, textvariable=self.status_value, style="Status.TLabel", anchor="e").pack(fill="x")
+
+    def refresh(self):
         """A cohesive, polished Hebrew desktop theme for the whole application."""
         self.colors = {
             "background": "#F3F6FA",
@@ -674,6 +903,55 @@ class App:
         info = f"שם: {row['title']}\nקובץ מקורי: {row['original_name']}\nנוסף בתאריך: {row['imported_at']}"
         self.detail_label.configure(text=info)
         self.preview_photo = None
+        self.preview_path = path if path.suffix.lower() in IMAGE_TYPES and Image is not None else None
+        if self.preview_path is not None:
+            self.preview_image.configure(image="", text="טוען תצוגה מקדימה…")
+            self.root.after_idle(self._render_selected_image)
+            return
+        self.preview_image.configure(image="", text="אין תצוגה מקדימה לתמונה של הקובץ הזה")
+
+    def _schedule_preview_resize(self, _event=None):
+        if self.preview_path is None:
+            return
+        if self._preview_resize_job is not None:
+            try:
+                self.root.after_cancel(self._preview_resize_job)
+            except tk.TclError:
+                pass
+        self._preview_resize_job = self.root.after(180, self._render_selected_image)
+
+    def _render_selected_image(self):
+        self._preview_resize_job = None
+        path = self.preview_path
+        if path is None or not path.is_file() or Image is None or ImageTk is None:
+            return
+        try:
+            self.preview_image.update_idletasks()
+            width = self.preview_image.winfo_width()
+            height = self.preview_image.winfo_height()
+            if width < 180:
+                width = 650
+            if height < 180:
+                height = 650
+            target_size = (max(420, width - 30), max(420, height - 30))
+            with Image.open(path) as source:
+                source.seek(0)
+                image = source.copy()
+            resampling = getattr(Image, "Resampling", Image)
+            image.thumbnail(target_size, getattr(resampling, "LANCZOS", 1))
+            self.preview_photo = ImageTk.PhotoImage(image)
+            self.preview_image.configure(image=self.preview_photo, text="")
+        except Exception as exc:
+            self.preview_image.configure(image="", text=f"לא ניתן להציג את התמונה\n{exc}")
+
+
+        row = self.selected_row()
+        if not row:
+            return
+        path = Path(row["stored_path"])
+        info = f"שם: {row['title']}\nקובץ מקורי: {row['original_name']}\nנוסף בתאריך: {row['imported_at']}"
+        self.detail_label.configure(text=info)
+        self.preview_photo = None
         if path.suffix.lower() in IMAGE_TYPES and Image is not None:
             try:
                 with Image.open(path) as image:
@@ -742,8 +1020,8 @@ class App:
         """Show files inside the application; Office files are converted headlessly to PDF."""
         window = tk.Toplevel(self.root)
         window.title(title)
-        window.geometry("1080x800")
-        window.minsize(720, 500)
+        window.geometry("1320x920")
+        window.minsize(820, 620)
         window.configure(background=self.colors["background"])
         window.transient(self.root)
         header = ttk.Frame(window, padding=(16, 12), style="Panel.TFrame")
@@ -837,9 +1115,9 @@ class App:
             for number, page in enumerate(document, 1):
                 page_width = max(1.0, float(page.rect.width))
                 page_height = max(1.0, float(page.rect.height))
-                scale = min(1.15, 900.0 / page_width)
-                frame_height = int(page_height * scale) + 36
-                frame = ttk.Frame(inner, width=930, height=frame_height, style="Panel.TFrame")
+                scale = min(1.35, 1120.0 / page_width)
+                frame_height = int(page_height * scale) + 42
+                frame = ttk.Frame(inner, width=1160, height=frame_height, style="Panel.TFrame")
                 frame.pack(fill="x", padx=8, pady=7)
                 frame.pack_propagate(False)
                 ttk.Label(frame, text=f"טעינת עמוד {number}…", style="Panel.TLabel").pack(expand=True)
@@ -889,7 +1167,7 @@ class App:
                                 frame,
                                 text=f"לא ניתן לטעון את עמוד {index + 1}: {page_error}",
                                 style="Panel.TLabel",
-                                wraplength=850,
+                                wraplength=1080,
                             ).pack(expand=True)
                     # Keep only nearby pages in memory. Distant pages are redrawn when revisited.
                     keep = set()
@@ -920,6 +1198,23 @@ class App:
             return None
 
     def _show_image_in_viewer(self, parent, path: Path):
+        try:
+            parent.update_idletasks()
+            width = max(1100, parent.winfo_width() - 70)
+            height = max(760, parent.winfo_height() - 70)
+            with Image.open(path) as source:
+                source.seek(0)
+                image = source.copy()
+            resampling = getattr(Image, "Resampling", Image)
+            image.thumbnail((width, height), getattr(resampling, "LANCZOS", 1))
+            photo = ImageTk.PhotoImage(image)
+            label = ttk.Label(parent, image=photo, style="Panel.TLabel")
+            label.image = photo
+            label.pack(expand=True, fill="both")
+        except Exception as exc:
+            ttk.Label(parent, text=f"לא ניתן להציג את התמונה: {exc}").pack()
+
+
         try:
             image = Image.open(path)
             image.seek(0)
