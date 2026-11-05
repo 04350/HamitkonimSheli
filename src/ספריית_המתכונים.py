@@ -2032,6 +2032,7 @@ class App:
         progress_window.title("ייבוא קבצים")
         progress_window.geometry("460x150")
         progress_window.transient(self.root)
+        progress_window.protocol("WM_DELETE_WINDOW", lambda: None)
         progress_window.grab_set()
         frame = ttk.Frame(progress_window, padding=18, style="App.TFrame")
         frame.pack(fill="both", expand=True)
