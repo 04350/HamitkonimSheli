@@ -25,6 +25,8 @@ from html.parser import HTMLParser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
+from recipe_center import RecipeCenter, recipe_search_text, compile_shopping_list, build_recipe_book_docx, export_recipe_book_pdf
+
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
     ROOT_CLASS = TkinterDnD.Tk
@@ -54,7 +56,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.5.0"
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 TEXT_TYPES = {".txt", ".md", ".csv", ".tsv", ".log"}
 WORD_TYPES = {".doc", ".docx", ".docm", ".odt", ".rtf"}
@@ -1102,6 +1104,7 @@ class App:
         actions = [
             ("＋  הוספת קבצים", self.add_files),
             ("▣  ייבוא תיקייה", self.add_folder),
+            ("📚  מרכז המתכונים", self.open_recipe_center),
             ("▤  פתיחת תיקיית הנתונים", self.open_data_folder),
             ("↥  יצירת גיבוי", self.backup),
             ("♻  סל מחזור", self.open_recycle_bin),
@@ -1212,6 +1215,10 @@ class App:
         ttk.Button(
             preview, text="תצוגת מתכון מקצועית  ✎",
             command=self.edit_recipe, style="Primary.TButton"
+        ).pack(fill="x", pady=(0, 7))
+        ttk.Button(
+            preview, text="הדפסת מתכון / חוברת PDF  🖨",
+            command=self.print_selected_recipe
         ).pack(fill="x", pady=(0, 7))
         ttk.Button(
             preview, text="פתיחת הקובץ  ↗", command=self.open_selected
@@ -1430,10 +1437,10 @@ class App:
                 continue
             if date_to and (imported is None or imported.date() > date_to):
                 continue
-            search_text = " ".join([
-                row["title"], row["content"], category,
-                " ".join(self.library.tag_names(row["id"]))
-            ])
+            item_tags = self.library.tag_names(row["id"])
+            search_text = recipe_search_text(
+                row["title"], row["content"], recipe, item_tags
+            )
             score = relevance(row["title"], search_text, query)
             if score > 0:
                 try:
@@ -1967,6 +1974,19 @@ class App:
 
         ttk.Button(buttons, text="שמירת הפרטים", style="Primary.TButton", command=save_recipe).pack(side="right")
         ttk.Button(buttons, text="סגירה", command=window.destroy).pack(side="left")
+
+
+    def open_recipe_center(self, initial_item_id=None):
+        RecipeCenter(
+            self, extract_ingredients, file_kind, safe_title, convert_office_to_pdf
+        ).show(initial_item_id=initial_item_id)
+
+    def print_selected_recipe(self):
+        row = self.selected_row()
+        if not row:
+            messagebox.showinfo("הדפסת מתכון", "יש לבחור מתכון או פריט בספרייה.")
+            return
+        self.open_recipe_center(initial_item_id=int(row["id"]))
 
     def show_duplicate_candidates(self):
         rows = self.library.rows()
