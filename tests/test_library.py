@@ -446,5 +446,97 @@ class בדיקותספרייה(unittest.TestCase):
                 self.assertIn("עוגת תפוחים", extracted)
                 self.assertIn("מרק ירקות", extracted)
 
+
+    def test_ייבוא_תיקיות_שומר_היררכיה_ונתיב_מקורי(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = temp
+                source = Path(temp) / "מקור" / "קינוחים" / "עוגות" / "עוגת תפוחים.txt"
+                source.parent.mkdir(parents=True)
+                source.write_text(
+                    "עוגת תפוחים\nמצרכים:\n2 כוסות קמח\n3 תפוחים\nאופן ההכנה:\nמערבבים\nאופים",
+                    encoding="utf-8"
+                )
+                library = app.RecipeLibrary()
+                added, title = library.import_one(source, relative_folder="קינוחים/עוגות")
+                self.assertTrue(added)
+                row = library.rows()[0]
+                stored = Path(row["stored_path"])
+                self.assertEqual(stored.parent, library.files_dir / "קינוחים" / "עוגות")
+                self.assertTrue(stored.is_file())
+                data = library.get_recipe_data(row["id"])
+                self.assertEqual(data["source_folder"], "קינוחים/עוגות")
+                self.assertIn("קינוחים", library.all_source_folders())
+                self.assertIn("קינוחים/עוגות", library.all_source_folders())
+                self.assertTrue(data["is_recipe"])
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_ייבוא_חכם_מזהה_מצרכים_והוראות(self):
+        parsed = app.parse_recipe_text(
+            "עוגת שוקולד\nמצרכים:\n2 כוסות קמח\n1 כוס סוכר\nאופן ההכנה:\nמערבבים היטב\nאופים 30 דקות"
+        )
+        self.assertEqual(parsed["title"], "עוגת שוקולד")
+        self.assertIn("2 כוסות קמח", parsed["ingredients"])
+        self.assertIn("מערבבים היטב", parsed["instructions"])
+        self.assertTrue(parsed["is_recipe"])
+        self.assertEqual(app.recipe_missing_parts(parsed), [])
+
+    def test_זיהוי_מתכונים_חסרים_ומסמכים_רגילים(self):
+        self.assertTrue(app.is_recipe_record({"is_recipe": True}, ""))
+        self.assertFalse(app.is_recipe_record({"is_recipe": False, "ingredients": "קמח"}, ""))
+        self.assertEqual(app.recipe_missing_parts({"ingredients": "קמח"}), ["הוראות הכנה"])
+        self.assertEqual(app.recipe_missing_parts({"instructions": "מערבבים"}), ["מצרכים"])
+
+    def test_שמירת_דירוג_היסטוריה_וגריסאות_לא_נמחקת_בעדכון_רגיל(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = temp
+                source = Path(temp) / "עוגה.txt"
+                source.write_text("עוגה", encoding="utf-8")
+                library = app.RecipeLibrary()
+                self.assertTrue(library.import_one(source)[0])
+                item_id = int(library.rows()[0]["id"])
+                library.set_recipe_data(item_id, {
+                    "rating": "5",
+                    "is_recipe": True,
+                    "history": [{"date": "01/01/2026", "loved": True, "changes": "פחות סוכר"}],
+                    "versions": [{"label": "כמות כפולה", "ingredients": "4 כוסות קמח"}],
+                })
+                library.set_recipe_data(item_id, {"category": "קינוחים"})
+                data = library.get_recipe_data(item_id)
+                self.assertEqual(data["category"], "קינוחים")
+                self.assertEqual(data["rating"], "5")
+                self.assertEqual(data["history"][0]["changes"], "פחות סוכר")
+                self.assertEqual(data["versions"][0]["label"], "כמות כפולה")
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_תוכן_עניינים_ומספור_עמודים_בחוברת(self):
+        if app.Document is None:
+            self.skipTest("נדרשת ספריית python-docx")
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "עיצוב.docx"
+            app.build_recipe_book_docx([
+                {"title": "מרק ירקות", "ingredients": "2 גזרים", "instructions": "מבשלים"},
+                {"title": "עוגת גבינה", "ingredients": "גבינה", "instructions": "אופים"},
+            ], "ספר המתכונים", target, template="אלגנטי", layout="כרטיסים קטנים (2 בעמוד)")
+            document = app.Document(str(target))
+            text = "\n".join(p.text for p in document.paragraphs)
+            self.assertIn("תוכן החוברת", text)
+            self.assertIn("מרק ירקות", text)
+            self.assertIn("עוגת גבינה", text)
+            self.assertIn("PAGE", document.sections[0].footer._element.xml)
+
 if __name__ == "__main__":
     unittest.main()
