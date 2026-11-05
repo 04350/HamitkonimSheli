@@ -1581,6 +1581,342 @@ class App:
             self.preview_photo = None
             self._set_preview_placeholder(f"לא ניתן להציג את התמונה\n{exc}")
 
+    def _bind_shortcuts(self):
+        self.root.bind_all("<Control-f>", self._focus_search)
+        self.root.bind_all("<Control-F>", self._focus_search)
+        self.root.bind_all("<Control-o>", lambda _event: self.open_selected())
+        self.root.bind_all("<Control-O>", lambda _event: self.open_selected())
+        self.root.bind_all("<Control-b>", lambda _event: self.backup())
+        self.root.bind_all("<Control-B>", lambda _event: self.backup())
+        self.root.bind_all("<Control-Shift-n>", lambda _event: self.open_collections_dialog())
+        self.root.bind_all("<Escape>", self._clear_search_shortcut)
+
+    def _focus_search(self, _event=None):
+        if self.search_entry is not None:
+            self.search_entry.focus_set()
+            self.search_entry.selection_range(0, "end")
+        return "break"
+
+    def _clear_search_shortcut(self, _event=None):
+        widget = self.root.focus_get()
+        if widget is self.search_entry and self.search_value.get():
+            self.search_value.set("")
+            self.refresh()
+            return "break"
+        return None
+
+    def _maybe_auto_backup(self):
+        try:
+            enabled = self.library.get_setting("auto_backup_enabled", "1") == "1"
+            interval = max(1, min(90, int(self.library.get_setting("auto_backup_days", "7"))))
+            last_value = self.library.get_setting("last_auto_backup", "")
+            last_time = None
+            if last_value:
+                try:
+                    last_time = datetime.fromisoformat(last_value)
+                except ValueError:
+                    last_time = None
+            due = last_time is None or datetime.now() - last_time >= timedelta(days=interval)
+            if enabled and due:
+                target = self.library.backup_dir / (
+                    "גיבוי-אוטומטי-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".zip"
+                )
+                self.library.create_backup(target)
+                self.library.set_setting("last_auto_backup", datetime.now().isoformat(timespec="seconds"))
+                backups = sorted(
+                    self.library.backup_dir.glob("גיבוי-אוטומטי-*.zip"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True
+                )
+                for old in backups[5:]:
+                    old.unlink(missing_ok=True)
+                self.status_value.set("נוצר גיבוי אוטומטי של הספרייה.")
+        except Exception as exc:
+            self.status_value.set(f"הגיבוי האוטומטי לא הושלם: {exc}")
+        finally:
+            self._auto_backup_job = self.root.after(6 * 60 * 60 * 1000, self._maybe_auto_backup)
+
+    def edit_recipe(self):
+        row = self.selected_row()
+        if not row:
+            messagebox.showinfo("פרטי מתכון", "יש לבחור קובץ או מתכון מהרשימה.")
+            return
+        item_id = int(row["id"])
+        data = self.library.get_recipe_data(item_id)
+        tags = self.library.tag_names(item_id)
+
+        window = tk.Toplevel(self.root)
+        window.title(f"פרטי מתכון – {row['title']}")
+        window.geometry("900x820")
+        window.minsize(760, 650)
+        window.transient(self.root)
+        window.configure(background=self.colors["background"])
+
+        outer = ttk.Frame(window, padding=18, style="App.TFrame")
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text=row["title"], style="Section.TLabel").pack(fill="x", anchor="e")
+        ttk.Label(
+            outer,
+            text="שמרו את פרטי המתכון, המצרכים, הוראות ההכנה והתגיות האישיות.",
+            style="Muted.TLabel"
+        ).pack(fill="x", pady=(3, 12))
+
+        top = ttk.Frame(outer, padding=12, style="Card.TFrame")
+        top.pack(fill="x")
+        variables = {}
+        fields = [
+            ("category", "קטגוריה", data.get("category", ""), 22),
+            ("prep_minutes", "זמן הכנה בדקות", str(data.get("prep_minutes", "")), 10),
+            ("cook_minutes", "זמן בישול בדקות", str(data.get("cook_minutes", "")), 10),
+            ("servings", "מספר מנות", str(data.get("servings", "4") or "4"), 8),
+        ]
+        for key, label, value, width in fields:
+            cell = ttk.Frame(top, style="Card.TFrame")
+            cell.pack(side="right", padx=5)
+            ttk.Label(cell, text=label, style="Muted.TLabel").pack(anchor="e")
+            variable = tk.StringVar(value=value)
+            variables[key] = variable
+            ttk.Entry(cell, textvariable=variable, width=width, justify="right").pack(anchor="e", pady=(3, 0))
+
+        tags_frame = ttk.Frame(outer, padding=12, style="Card.TFrame")
+        tags_frame.pack(fill="x", pady=(10, 0))
+        ttk.Label(tags_frame, text="תגיות אישיות (הפרידו בפסיקים)", style="Muted.TLabel").pack(anchor="e")
+        tags_var = tk.StringVar(value=", ".join(tags))
+        ttk.Entry(tags_frame, textvariable=tags_var, justify="right").pack(fill="x", pady=(4, 0))
+
+        def add_text_section(parent, title, initial, height):
+            frame = ttk.Frame(parent, padding=10, style="Card.TFrame")
+            frame.pack(fill="both", expand=True, pady=(8, 0))
+            ttk.Label(frame, text=title, style="Section.TLabel").pack(fill="x", anchor="e", pady=(0, 5))
+            area = tk.Text(
+                frame, height=height, wrap="word", font=("Segoe UI", 10),
+                background="#FFFFFF", foreground=self.colors["text"],
+                insertbackground=self.colors["accent"], relief="flat",
+                highlightthickness=1, highlightbackground=self.colors["border"],
+                padx=10, pady=8
+            )
+            area.pack(fill="both", expand=True)
+            area.insert("1.0", initial or "")
+            area.tag_configure("rtl", justify="right")
+            area.tag_add("rtl", "1.0", "end")
+            return frame, area
+
+        content = row["content"] or ""
+        initial_ingredients = data.get("ingredients") or extract_ingredients(content)
+        ingredients_frame, ingredients_text = add_text_section(
+            outer, "מצרכים – שורה לכל רכיב", initial_ingredients, 8
+        )
+        tools = ttk.Frame(ingredients_frame, style="Card.TFrame")
+        tools.pack(fill="x", pady=(6, 0))
+        ttk.Button(
+            tools, text="זיהוי מצרכים מתוך הקובץ",
+            command=lambda: (
+                ingredients_text.delete("1.0", "end"),
+                ingredients_text.insert("1.0", extract_ingredients(content))
+            )
+        ).pack(side="right")
+
+        instructions_frame, instructions_text = add_text_section(
+            outer, "הוראות הכנה", data.get("instructions", ""), 8
+        )
+        notes_frame, notes_text = add_text_section(
+            outer, "הערות אישיות", data.get("notes", ""), 4
+        )
+
+        scale_frame = ttk.Frame(outer, padding=10, style="Card.TFrame")
+        scale_frame.pack(fill="x", pady=(9, 0))
+        ttk.Label(scale_frame, text="חישוב כמויות למספר מנות אחר", style="Panel.TLabel").pack(side="right", padx=(0, 8))
+        target_servings = tk.StringVar(value=str(data.get("servings", "4") or "4"))
+        ttk.Entry(scale_frame, textvariable=target_servings, width=7, justify="center").pack(side="right", padx=5)
+
+        def show_scaled_ingredients():
+            try:
+                base = int(variables["servings"].get() or "4")
+                target = int(target_servings.get())
+                if base < 1 or target < 1 or target > 500:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("כמויות", "הזינו מספר מנות תקין (1 עד 500).", parent=window)
+                return
+            current = ingredients_text.get("1.0", "end-1c")
+            scaled = scale_ingredient_amounts(current, base, target)
+            result = tk.Toplevel(window)
+            result.title(f"כמויות ל־{target} מנות")
+            result.geometry("520x560")
+            frame = ttk.Frame(result, padding=14, style="App.TFrame")
+            frame.pack(fill="both", expand=True)
+            ttk.Label(frame, text=f"המצרכים ל־{target} מנות", style="Section.TLabel").pack(fill="x")
+            text_area = tk.Text(frame, wrap="word", font=("Segoe UI", 11), padx=12, pady=12)
+            text_area.pack(fill="both", expand=True, pady=8)
+            text_area.insert("1.0", scaled)
+            text_area.tag_configure("rtl", justify="right")
+            text_area.tag_add("rtl", "1.0", "end")
+            text_area.configure(state="disabled")
+
+        ttk.Button(scale_frame, text="חשב כמויות", command=show_scaled_ingredients).pack(side="left")
+
+        buttons = ttk.Frame(outer, style="App.TFrame")
+        buttons.pack(fill="x", pady=(12, 0))
+
+        def save_recipe():
+            try:
+                for key in ("prep_minutes", "cook_minutes", "servings"):
+                    value = variables[key].get().strip()
+                    if value and (not value.isdigit() or int(value) > 10000):
+                        raise ValueError("זמני הכנה, בישול ומספר מנות חייבים להיות מספרים חיוביים.")
+                if variables["servings"].get().strip() and int(variables["servings"].get()) < 1:
+                    raise ValueError("מספר המנות חייב להיות לפחות 1.")
+                recipe = {
+                    "category": variables["category"].get().strip(),
+                    "prep_minutes": variables["prep_minutes"].get().strip(),
+                    "cook_minutes": variables["cook_minutes"].get().strip(),
+                    "servings": variables["servings"].get().strip() or "4",
+                    "ingredients": ingredients_text.get("1.0", "end-1c").strip(),
+                    "instructions": instructions_text.get("1.0", "end-1c").strip(),
+                    "notes": notes_text.get("1.0", "end-1c").strip(),
+                }
+                self.library.set_recipe_data(item_id, recipe)
+                self.library.set_item_tags(item_id, tags_var.get().split(","))
+                self.refresh()
+                self.status_value.set("פרטי המתכון והתגיות נשמרו.")
+                window.destroy()
+            except Exception as exc:
+                messagebox.showerror("שמירת מתכון", str(exc), parent=window)
+
+        ttk.Button(buttons, text="שמירת הפרטים", style="Primary.TButton", command=save_recipe).pack(side="right")
+        ttk.Button(buttons, text="סגירה", command=window.destroy).pack(side="left")
+
+    def show_duplicate_candidates(self):
+        rows = self.library.rows()
+        if len(rows) < 2:
+            messagebox.showinfo("בדיקת כפילויות", "נדרשים לפחות שני קבצים בספרייה.")
+            return
+        # Avoid quadratic work on extremely large libraries; compare the newest 700 items.
+        rows = rows[:700]
+        found = []
+        for index, first in enumerate(rows):
+            first_title = normalize(first["title"])
+            first_content = first["content"] or ""
+            for second in rows[index + 1:]:
+                title_score = SequenceMatcher(None, first_title, normalize(second["title"])).ratio()
+                content_score = text_similarity(first_content, second["content"] or "")
+                score = max(title_score, content_score)
+                if score >= 0.76:
+                    found.append((score, first, second))
+        found.sort(key=lambda item: item[0], reverse=True)
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("איתור מתכונים וקבצים דומים")
+        dialog.geometry("900x560")
+        dialog.transient(self.root)
+        frame = ttk.Frame(dialog, padding=15, style="App.TFrame")
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="פריטים דומים לבדיקה", style="Section.TLabel").pack(fill="x", anchor="e")
+        ttk.Label(
+            frame, text="הזיהוי מבוסס על דמיון בשם ובתוכן. אין מחיקה אוטומטית.",
+            style="Muted.TLabel"
+        ).pack(fill="x", pady=(3, 10))
+        columns = ("score", "second", "first")
+        tree = ttk.Treeview(frame, columns=columns, show="headings")
+        tree.heading("score", text="דמיון")
+        tree.heading("second", text="פריט דומה")
+        tree.heading("first", text="פריט מקורי")
+        tree.column("score", width=90, anchor="center")
+        tree.column("second", width=340, anchor="e")
+        tree.column("first", width=340, anchor="e")
+        tree.pack(fill="both", expand=True)
+        if not found:
+            tree.insert("", "end", values=("—", "לא נמצאו התאמות דומות", ""))
+        else:
+            for score, first, second in found[:250]:
+                tree.insert(
+                    "", "end",
+                    values=(f"{score * 100:.0f}%", second["title"], first["title"])
+                )
+        ttk.Button(frame, text="סגירה", command=dialog.destroy).pack(anchor="w", pady=(10, 0))
+
+    def open_recycle_bin(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("סל המחזור")
+        dialog.geometry("850x520")
+        dialog.transient(self.root)
+        frame = ttk.Frame(dialog, padding=15, style="App.TFrame")
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="סל המחזור", style="Section.TLabel").pack(fill="x", anchor="e")
+        ttk.Label(
+            frame, text="קבצים שהוסרו מהספרייה נשארים כאן עד לשחזור או למחיקה סופית.",
+            style="Muted.TLabel"
+        ).pack(fill="x", pady=(3, 10))
+        tree = ttk.Treeview(frame, columns=("deleted", "kind", "title"), show="headings", selectmode="browse")
+        tree.heading("deleted", text="תאריך הסרה")
+        tree.heading("kind", text="סוג קובץ")
+        tree.heading("title", text="שם הקובץ")
+        tree.column("deleted", width=150, anchor="e")
+        tree.column("kind", width=130, anchor="e")
+        tree.column("title", width=500, anchor="e")
+        tree.pack(fill="both", expand=True)
+        rows = self.library.recycled_rows()
+        item_map = {}
+        for row in rows:
+            iid = str(row["id"])
+            item_map[iid] = row
+            tree.insert("", "end", iid=iid, values=(row["deleted_at"], file_kind(row["extension"]), row["title"]))
+
+        controls = ttk.Frame(frame, style="App.TFrame")
+        controls.pack(fill="x", pady=(10, 0))
+
+        def restore():
+            selected = tree.selection()
+            if not selected:
+                return
+            self.library.restore_from_recycle_bin(int(selected[0]))
+            self.refresh()
+            dialog.destroy()
+            self.status_value.set("הקובץ שוחזר מסל המחזור.")
+
+        def delete_forever():
+            selected = tree.selection()
+            if not selected:
+                return
+            row = item_map[selected[0]]
+            if messagebox.askyesno(
+                "מחיקה סופית",
+                f"למחוק לצמיתות את ״{row['title']}״? לא ניתן יהיה לשחזר אותו.",
+                parent=dialog
+            ):
+                self.library.permanently_delete(int(selected[0]))
+                tree.delete(selected[0])
+                item_map.pop(selected[0], None)
+
+        ttk.Button(controls, text="שחזור פריט", style="Primary.TButton", command=restore).pack(side="right")
+        ttk.Button(controls, text="מחיקה לצמיתות", style="Danger.TButton", command=delete_forever).pack(side="right", padx=6)
+        ttk.Button(controls, text="סגירה", command=dialog.destroy).pack(side="left")
+
+    def restore_backup(self):
+        source = filedialog.askopenfilename(
+            title="בחירת קובץ גיבוי לשחזור",
+            filetypes=[("גיבוי ספרייה (ZIP)", "*.zip")]
+        )
+        if not source:
+            return
+        if not messagebox.askyesno(
+            "אישור שחזור גיבוי",
+            "השחזור יחליף את הספרייה הנוכחית בתוכן הגיבוי. מומלץ ליצור גיבוי עדכני לפני ההמשך.\nלהמשיך?"
+        ):
+            return
+        try:
+            count = self.library.restore_backup(Path(source))
+            self.refresh()
+            messagebox.showinfo("השחזור הושלם", f"הספרייה שוחזרה בהצלחה. נטענו {count} רשומות.")
+            self.status_value.set("הספרייה שוחזרה מגיבוי.")
+        except Exception as exc:
+            messagebox.showerror("שחזור נכשל", f"הספרייה הנוכחית נשמרה ככל האפשר.\n{exc}")
+
+    def _cleanup_preview_temp(self):
+        if self.preview_temp_directory is not None:
+            shutil.rmtree(self.preview_temp_directory, ignore_errors=True)
+            self.preview_temp_directory = None
+
     def add_files(self):
         paths = filedialog.askopenfilenames(title="בחירת קבצים להוספה", filetypes=[("כל הקבצים", "*.*")])
         if paths:
