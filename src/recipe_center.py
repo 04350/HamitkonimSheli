@@ -319,6 +319,7 @@ class RecipeCenter:
         self.converter = converter
         self.records = []
         self.by_id = {}
+        self.preview_dirs = []
 
     def show(self, initial_item_id=None):
         app = self.app
@@ -353,6 +354,11 @@ class RecipeCenter:
                 "notes": str(data.get("notes") or ""),
                 "content": str(row["content"] or ""),
                 "extension": str(row["extension"] or ""),
+                "image_path": str(row["stored_path"]) if str(row["extension"] or "").lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"} else "",
+                "source_folder": str(data.get("source_folder") or ""),
+                "rating": str(data.get("rating") or ""),
+                "is_recipe": bool(data.get("is_recipe", is_recipe_record(data, row["content"] or ""))),
+                "history": list(data.get("history") or []),
             }
             self.records.append(record)
             self.by_id[record["id"]] = record
@@ -416,11 +422,56 @@ class RecipeCenter:
         ttk.Entry(options, textvariable=title_var, justify="right", width=30).pack(fill="x", pady=(4, 12))
         notes_var = tk.BooleanVar(value=True)
         open_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options, text="לכלול הערות אישיות", variable=notes_var).pack(anchor="e", pady=3)
-        ttk.Checkbutton(options, text="לפתוח PDF לאחר היצירה", variable=open_var).pack(anchor="e", pady=3)
+        toc_var = tk.BooleanVar(value=True)
+        images_var = tk.BooleanVar(value=True)
+        pages_var = tk.BooleanVar(value=True)
+        template_var = tk.StringVar(value="קלאסי")
+        layout_var = tk.StringVar(value="עמוד לכל מתכון")
+        ttk.Label(options, text="עיצוב החוברת:", style="Panel.TLabel").pack(fill="x", anchor="e")
+        ttk.Combobox(options, textvariable=template_var, values=["קלאסי", "אלגנטי", "פשוט"], state="readonly", width=26, justify="right").pack(fill="x", pady=(3, 7))
+        ttk.Label(options, text="פריסת עמודים:", style="Panel.TLabel").pack(fill="x", anchor="e")
+        ttk.Combobox(options, textvariable=layout_var, values=["עמוד לכל מתכון", "קומפקטי", "כרטיסים קטנים (2 בעמוד)"], state="readonly", width=26, justify="right").pack(fill="x", pady=(3, 7))
+        ttk.Checkbutton(options, text="לכלול הערות אישיות", variable=notes_var).pack(anchor="e", pady=2)
+        ttk.Checkbutton(options, text="לכלול תוכן החוברת", variable=toc_var).pack(anchor="e", pady=2)
+        ttk.Checkbutton(options, text="לכלול תמונות", variable=images_var).pack(anchor="e", pady=2)
+        ttk.Checkbutton(options, text="מספרי עמודים", variable=pages_var).pack(anchor="e", pady=2)
+        ttk.Checkbutton(options, text="לפתוח PDF לאחר היצירה", variable=open_var).pack(anchor="e", pady=2)
+
+        def export_options():
+            return {
+                "include_notes": notes_var.get(),
+                "template": template_var.get(),
+                "layout": layout_var.get(),
+                "include_toc": toc_var.get(),
+                "include_images": images_var.get(),
+                "include_page_numbers": pages_var.get(),
+            }
+
+        def selected_recipes():
+            chosen = selected(print_box)
+            for record in chosen:
+                source_record = self.by_id.get(record["id"], {})
+                record["image_path"] = source_record.get("image_path", "")
+                record["source_folder"] = source_record.get("source_folder", "")
+                record["rating"] = source_record.get("rating", "")
+            return chosen
+
+        def preview_pdf():
+            chosen = selected_recipes()
+            if not chosen:
+                messagebox.showinfo("תצוגה מקדימה", "בחרו לפחות מתכון אחד.", parent=window)
+                return
+            try:
+                preview_dir = Path(tempfile.mkdtemp(prefix="recipe-print-preview-"))
+                self.preview_dirs.append(preview_dir)
+                preview_path = preview_dir / "תצוגה-מקדימה.pdf"
+                export_recipe_book_pdf(chosen, title_var.get().strip() or "חוברת המתכונים שלי", preview_path, self.converter, **export_options())
+                app.show_viewer(preview_path, "תצוגה מקדימה – חוברת מתכונים")
+            except Exception as exc:
+                messagebox.showerror("תצוגה מקדימה", f"לא ניתן ליצור תצוגה מקדימה.\\n{exc}", parent=window)
 
         def create_pdf():
-            chosen = selected(print_box)
+            chosen = selected_recipes()
             if not chosen:
                 messagebox.showinfo("יצירת חוברת", "בחרו לפחות פריט אחד מהרשימה.", parent=window)
                 return
@@ -434,7 +485,7 @@ class RecipeCenter:
             if not target:
                 return
             try:
-                result = export_recipe_book_pdf(chosen, title, Path(target), self.converter, notes_var.get())
+                result = export_recipe_book_pdf(chosen, title, Path(target), self.converter, **export_options())
                 app.status_value.set(f"חוברת PDF נוצרה: {result.name}")
                 messagebox.showinfo("החוברת מוכנה", f"קובץ PDF נוצר בהצלחה.\n\n{result}\n\nאפשר לפתוח אותו ולהדפיס במדפסת הרגילה.", parent=window)
                 if open_var.get():
@@ -445,7 +496,8 @@ class RecipeCenter:
             except Exception as exc:
                 messagebox.showerror("שגיאה ביצירת PDF", f"לא ניתן ליצור את החוברת.\n{exc}\n\nבדקו שתיקיית LibreOffice נמצאת לצד קובץ התוכנה.", parent=window)
 
-        ttk.Button(options, text="יצירת חוברת PDF  🖨", style="Primary.TButton", command=create_pdf).pack(fill="x", pady=(18, 6))
+        ttk.Button(options, text="תצוגה מקדימה לפני יצירה", command=preview_pdf).pack(fill="x", pady=(12, 5))
+        ttk.Button(options, text="יצירת חוברת PDF  🖨", style="Primary.TButton", command=create_pdf).pack(fill="x", pady=(3, 6))
         ttk.Label(options, text="ה-PDF הוא קובץ עצמאי שאפשר להדפיס, לשלוח או לשמור.", style="Muted.TLabel", wraplength=260, justify="right").pack(fill="x", pady=(6, 0))
 
         # 2. Shopping list from multiple recipes.
