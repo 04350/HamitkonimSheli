@@ -916,8 +916,18 @@ class App:
         self._apply_styles()
         self.search_value = tk.StringVar()
         self.filter_value = tk.StringVar(value="כל הקבצים")
+        self.type_filter_value = tk.StringVar(value="כל הסוגים")
+        self.category_filter_value = tk.StringVar(value="כל הקטגוריות")
+        self.tag_filter_value = tk.StringVar(value="כל התגיות")
+        self.sort_value = tk.StringVar(value="תאריך: חדש לישן")
+        self.date_from_value = tk.StringVar()
+        self.date_to_value = tk.StringVar()
         self._filter_options = {}
         self.favorite_button = None
+        self.preview_temp_directory = None
+        self.preview_render_path = None
+        self.search_entry = None
+        self._auto_backup_job = None
         self.status_value = tk.StringVar(value="ברוכים הבאים! אפשר להוסיף קבצים או לגרור אותם לחלון.")
         self.preview_photo = None
         self.preview_path = None
@@ -932,24 +942,24 @@ class App:
             except Exception:
                 pass
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self._bind_shortcuts()
+        self.root.after(2500, self._maybe_auto_backup)
 
     def _apply_styles(self):
         """Apply a modern, high-contrast desktop theme."""
-        self.colors = {
-            "background": "#EEF3F9",
-            "surface": "#FFFFFF",
-            "navy": "#172A45",
-            "hero": "#10243D",
-            "text": "#25364D",
-            "muted": "#718198",
-            "border": "#DCE5EF",
-            "accent": "#087E8B",
-            "accent_hover": "#066571",
-            "soft": "#E6F3F5",
-            "row_alt": "#F5F8FC",
-            "selected": "#DCEFF2",
-            "danger": "#B83E4B",
+        theme = self.library.get_setting("color_theme", "כחול")
+        palettes = {
+            "כחול": ("#EEF3F9", "#FFFFFF", "#172A45", "#10243D", "#25364D", "#718198", "#DCE5EF", "#087E8B", "#066571", "#F5F8FC", "#DCEFF2", "#B83E4B"),
+            "ירוק": ("#EFF6F3", "#FFFFFF", "#173E35", "#12362F", "#25443D", "#72877F", "#D8E7E0", "#16846D", "#116B58", "#F4F9F6", "#DDEFE7", "#B83E4B"),
+            "סגול": ("#F3F0F8", "#FFFFFF", "#33274D", "#261C3C", "#3D3450", "#80758F", "#E2DCEC", "#7655A6", "#61438D", "#F8F6FB", "#EAE2F5", "#B83E4B"),
         }
+        values = palettes.get(theme, palettes["כחול"])
+        names = ("background", "surface", "navy", "hero", "text", "muted", "border", "accent", "accent_hover", "row_alt", "selected", "danger")
+        self.colors = dict(zip(names, values))
+        try:
+            font_size = max(8, min(15, int(self.library.get_setting("font_size", "10"))))
+        except ValueError:
+            font_size = 10
         try:
             self.style.theme_use("clam")
         except Exception:
@@ -957,7 +967,7 @@ class App:
 
         c = self.colors
         self.root.configure(background=c["background"])
-        self.style.configure(".", font=("Segoe UI", 10), foreground=c["text"])
+        self.style.configure(".", font=("Segoe UI", font_size), foreground=c["text"])
         self.style.configure("App.TFrame", background=c["background"])
         self.style.configure("Card.TFrame", background=c["surface"])
         self.style.configure("Panel.TFrame", background=c["surface"])
@@ -1063,6 +1073,7 @@ class App:
         search_frame.pack(fill="x", pady=(0, 10))
         ttk.Label(search_frame, text="חיפוש בספרייה", style="Section.TLabel").pack(side="right", padx=(10, 14))
         entry = ttk.Entry(search_frame, textvariable=self.search_value, justify="right")
+        self.search_entry = entry
         entry.pack(side="right", fill="x", expand=True, padx=5)
         entry.bind("<KeyRelease>", lambda _event: self.refresh())
         ttk.Button(
@@ -1078,6 +1089,7 @@ class App:
             ("▣  ייבוא תיקייה", self.add_folder),
             ("▤  פתיחת תיקיית הנתונים", self.open_data_folder),
             ("↥  יצירת גיבוי", self.backup),
+            ("♻  סל מחזור", self.open_recycle_bin),
             ("⚙  הגדרות", self.settings),
         ]
         for label, command in actions:
@@ -1094,10 +1106,51 @@ class App:
         )
         self.filter_combo.pack(side="right", padx=4)
         self.filter_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
+        self.type_combo = ttk.Combobox(
+            filter_frame, textvariable=self.type_filter_value,
+            state="readonly", width=12, justify="right",
+            values=["כל הסוגים", "תמונה", "מסמך", "גיליון", "מצגת", "ספר דיגיטלי", "קובץ"]
+        )
+        self.type_combo.pack(side="right", padx=4)
+        self.type_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
+        self.category_combo = ttk.Combobox(
+            filter_frame, textvariable=self.category_filter_value,
+            state="readonly", width=15, justify="right"
+        )
+        self.category_combo.pack(side="right", padx=4)
+        self.category_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
+        self.tag_combo = ttk.Combobox(
+            filter_frame, textvariable=self.tag_filter_value,
+            state="readonly", width=12, justify="right"
+        )
+        self.tag_combo.pack(side="right", padx=4)
+        self.tag_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
+        self.sort_combo = ttk.Combobox(
+            filter_frame, textvariable=self.sort_value,
+            state="readonly", width=18, justify="right",
+            values=["תאריך: חדש לישן", "תאריך: ישן לחדש", "שם: א-ת", "שם: ת-א", "סוג קובץ", "גודל: גדול לקטן", "נצפו לאחרונה"]
+        )
+        self.sort_combo.pack(side="right", padx=4)
+        self.sort_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
         ttk.Button(
             filter_frame, text="📁  ניהול אוספים",
             command=self.open_collections_dialog
         ).pack(side="left", padx=(4, 0))
+
+        date_frame = ttk.Frame(outer, padding=(12, 7), style="Card.TFrame")
+        date_frame.pack(fill="x", pady=(0, 10))
+        ttk.Label(date_frame, text="מתאריך:", style="Panel.TLabel").pack(side="right", padx=(0, 4))
+        self.date_from_entry = ttk.Entry(date_frame, textvariable=self.date_from_value, width=11, justify="center")
+        self.date_from_entry.pack(side="right", padx=3)
+        ttk.Label(date_frame, text="עד תאריך:", style="Panel.TLabel").pack(side="right", padx=(6, 3))
+        self.date_to_entry = ttk.Entry(date_frame, textvariable=self.date_to_value, width=11, justify="center")
+        self.date_to_entry.pack(side="right", padx=3)
+        self.date_from_entry.bind("<Return>", lambda _event: self.refresh())
+        self.date_to_entry.bind("<Return>", lambda _event: self.refresh())
+        ttk.Button(date_frame, text="החל תאריכים", command=self.refresh).pack(side="right", padx=4)
+        ttk.Button(date_frame, text="ניקוי תאריכים", command=self._clear_date_filters).pack(side="right", padx=4)
+        ttk.Button(date_frame, text="בדיקת כפילויות", command=self.show_duplicate_candidates).pack(side="left", padx=4)
+        ttk.Button(date_frame, text="שחזור מגיבוי", command=self.restore_backup).pack(side="left", padx=4)
 
         # Resizable work area: preview on the left, file list on the right.
         body = ttk.Frame(outer, style="App.TFrame")
@@ -1142,8 +1195,11 @@ class App:
             command=self.open_collections_dialog
         ).pack(side="left", fill="x", expand=True, padx=(4, 0))
         ttk.Button(
-            preview, text="פתיחת הקובץ  ↗", command=self.open_selected,
-            style="Primary.TButton"
+            preview, text="תצוגת מתכון מקצועית  ✎",
+            command=self.edit_recipe, style="Primary.TButton"
+        ).pack(fill="x", pady=(0, 7))
+        ttk.Button(
+            preview, text="פתיחת הקובץ  ↗", command=self.open_selected
         ).pack(fill="x", pady=(0, 7))
         preview_actions = ttk.Frame(preview, style="Card.TFrame")
         preview_actions.pack(fill="x")
