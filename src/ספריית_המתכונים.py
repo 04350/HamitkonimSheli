@@ -54,7 +54,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 TEXT_TYPES = {".txt", ".md", ".csv", ".tsv", ".log"}
 WORD_TYPES = {".doc", ".docx", ".docm", ".odt", ".rtf"}
@@ -930,6 +930,11 @@ class App:
         self.category_filter_value = tk.StringVar(value="כל הקטגוריות")
         self.tag_filter_value = tk.StringVar(value="כל התגיות")
         self.sort_value = tk.StringVar(value="תאריך: חדש לישן")
+        self.view_mode = tk.StringVar(value=self.library.get_setting("view_mode", "רשימה"))
+        if self.view_mode.get() not in ("רשימה", "גלריה"):
+            self.view_mode.set("רשימה")
+        self.selected_item_id = None
+        self.gallery_photos = []
         self.date_from_value = tk.StringVar()
         self.date_to_value = tk.StringVar()
         self._filter_options = {}
@@ -1228,6 +1233,10 @@ class App:
             table_header, text="בחרו פריט כדי להציג פרטים ותצוגה מקדימה",
             style="Muted.TLabel"
         ).pack(side="left")
+        view_switch = ttk.Frame(table_header, style="Card.TFrame")
+        view_switch.pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(view_switch, text="☷ רשימה", value="רשימה", variable=self.view_mode, command=self.change_view_mode).pack(side="right", padx=3)
+        ttk.Radiobutton(view_switch, text="▦ גלריה", value="גלריה", variable=self.view_mode, command=self.change_view_mode).pack(side="right", padx=3)
 
         table_body = ttk.Frame(table_card, style="Card.TFrame")
         table_body.pack(fill="both", expand=True)
@@ -1252,9 +1261,95 @@ class App:
         self.tree.bind("<<TreeviewSelect>>", self.show_selected)
         self.tree.bind("<Double-1>", lambda _event: self.open_selected())
 
+        self.gallery_container = ttk.Frame(table_body, style="Card.TFrame")
+        self.gallery_canvas = tk.Canvas(self.gallery_container, background=self.colors["surface"], highlightthickness=0, bd=0)
+        gallery_scroll = ttk.Scrollbar(self.gallery_container, orient="vertical", command=self.gallery_canvas.yview)
+        self.gallery_canvas.configure(yscrollcommand=gallery_scroll.set)
+        gallery_scroll.pack(side="left", fill="y")
+        self.gallery_canvas.pack(side="right", fill="both", expand=True)
+        self.gallery_inner = ttk.Frame(self.gallery_canvas, style="Card.TFrame")
+        self.gallery_window = self.gallery_canvas.create_window((0, 0), window=self.gallery_inner, anchor="nw")
+        self.gallery_inner.bind("<Configure>", lambda _event: self.gallery_canvas.configure(scrollregion=self.gallery_canvas.bbox("all")))
+        self.gallery_canvas.bind("<Configure>", lambda event: self.gallery_canvas.itemconfigure(self.gallery_window, width=event.width))
+        if self.view_mode.get() == "גלריה":
+            self.gallery_container.pack(fill="both", expand=True)
+        else:
+            self.tree.pack(side="right", fill="both", expand=True)
+
         status_frame = ttk.Frame(outer, padding=(10, 7), style="Card.TFrame")
         status_frame.pack(fill="x", pady=(10, 0))
         ttk.Label(status_frame, textvariable=self.status_value, style="Status.TLabel", anchor="e").pack(fill="x")
+
+    def change_view_mode(self):
+        """Switch between list and gallery views and remember the choice."""
+        mode = self.view_mode.get()
+        self.library.set_setting("view_mode", mode)
+        if mode == "גלריה":
+            self.tree.pack_forget()
+            self.gallery_container.pack(fill="both", expand=True)
+        else:
+            self.gallery_container.pack_forget()
+            self.tree.pack(side="right", fill="both", expand=True)
+        self.refresh()
+
+    def _bind_gallery_click(self, widget, item_id):
+        widget.bind("<Button-1>", lambda _event, value=item_id: self._select_gallery_item(value))
+        for child in widget.winfo_children():
+            self._bind_gallery_click(child, item_id)
+
+    def _select_gallery_item(self, item_id):
+        self.selected_item_id = str(item_id)
+        self.show_selected()
+        self._render_gallery_cards_selection()
+
+    def _render_gallery_cards_selection(self):
+        for item_id, card in getattr(self, "gallery_cards", {}).items():
+            selected = str(item_id) == str(self.selected_item_id)
+            try:
+                card.configure(highlightbackground=self.colors["accent"] if selected else self.colors["border"], highlightthickness=3 if selected else 1)
+            except tk.TclError:
+                pass
+
+    def _render_gallery(self, ranked):
+        for child in self.gallery_inner.winfo_children():
+            child.destroy()
+        self.gallery_photos = []
+        self.gallery_cards = {}
+        columns = 4
+        for index, (_score, row, file_size, _imported) in enumerate(ranked):
+            item_id = str(row["id"])
+            selected = item_id == str(self.selected_item_id)
+            card = tk.Frame(self.gallery_inner, background=self.colors["surface"], highlightbackground=self.colors["accent"] if selected else self.colors["border"], highlightthickness=3 if selected else 1, bd=0, cursor="hand2")
+            card.grid(row=index // columns, column=columns - 1 - (index % columns), sticky="nsew", padx=7, pady=7)
+            self.gallery_cards[item_id] = card
+            suffix = row["extension"].lower()
+            preview = None
+            if suffix in IMAGE_TYPES and Image is not None and ImageTk is not None:
+                try:
+                    with Image.open(row["stored_path"]) as source:
+                        source.thumbnail((170, 112))
+                        preview = ImageTk.PhotoImage(source.copy())
+                    self.gallery_photos.append(preview)
+                except Exception:
+                    preview = None
+            if preview is not None:
+                picture = tk.Label(card, image=preview, background=self.colors["surface"], height=112)
+                picture.image = preview
+            else:
+                picture = tk.Label(card, text=file_kind(suffix), background=self.colors["row_alt"], foreground=self.colors["accent"], font=("Segoe UI", 16, "bold"), height=4)
+            picture.pack(fill="x", padx=8, pady=(8, 5))
+            title = tk.Label(card, text=row["title"], background=self.colors["surface"], foreground=self.colors["navy"], font=("Segoe UI", 10, "bold"), justify="right", anchor="e", wraplength=170)
+            title.pack(fill="x", padx=9, pady=(2, 4))
+            size_label = f"{file_size / (1024 * 1024):.1f} MB" if file_size >= 1024 * 1024 else f"{max(1, file_size // 1024)} KB"
+            details = tk.Label(card, text=f"{file_kind(suffix)}  ·  {row['imported_at']}  ·  {size_label}", background=self.colors["surface"], foreground=self.colors["muted"], font=("Segoe UI", 8), justify="right", anchor="e", wraplength=170)
+            details.pack(fill="x", padx=9, pady=(0, 9))
+            if row["is_favorite"]:
+                favorite = tk.Label(card, text="★ מועדף", background=self.colors["surface"], foreground=self.colors["accent"], font=("Segoe UI", 8, "bold"))
+                favorite.pack(anchor="e", padx=9, pady=(0, 5))
+            self._bind_gallery_click(card, item_id)
+        for column in range(columns):
+            self.gallery_inner.grid_columnconfigure(column, weight=1, uniform="gallery")
+        self.gallery_canvas.configure(scrollregion=self.gallery_canvas.bbox("all"))
 
     def _update_filter_options(self):
         options = {
@@ -1303,7 +1398,7 @@ class App:
 
     def refresh(self):
         selected = self.tree.selection()
-        selected_id = selected[0] if selected else None
+        selected_id = selected[0] if selected else self.selected_item_id
         self._update_filter_options()
         mode, filter_id = self._filter_options.get(self.filter_value.get(), ("all", None))
         rows = self.library.rows(
@@ -1377,12 +1472,17 @@ class App:
                 values=(star, row["imported_at"], file_kind(row["extension"]), size_label, row["title"]),
                 tags=("even" if index % 2 == 0 else "odd",)
             )
+        self._render_gallery(ranked)
         self.status_value.set(f"נמצאו {len(ranked)} פריטים לפי הסינון הנוכחי.")
         if selected_id and selected_id in self.current_rows:
-            self.tree.selection_set(selected_id)
-            self.tree.focus(selected_id)
+            self.selected_item_id = selected_id
+            if self.view_mode.get() == "רשימה":
+                self.tree.selection_set(selected_id)
+                self.tree.focus(selected_id)
             self.show_selected()
+            self._render_gallery_cards_selection()
         else:
+            self.selected_item_id = None
             self.preview_path = None
             self.preview_render_path = None
             self.preview_photo = None
@@ -1398,8 +1498,13 @@ class App:
             self._update_selection_actions(None)
 
     def selected_row(self):
+        if self.view_mode.get() == "גלריה":
+            return self.current_rows.get(str(self.selected_item_id)) if self.selected_item_id else None
         selected = self.tree.selection()
-        return self.current_rows.get(selected[0]) if selected else None
+        if selected:
+            self.selected_item_id = selected[0]
+            return self.current_rows.get(selected[0])
+        return None
 
     def _set_preview_placeholder(self, message: str):
         """Draw placeholder text on the canvas without affecting its requested size."""
@@ -1430,6 +1535,7 @@ class App:
         if not row:
             self._update_selection_actions(None)
             return
+        self.selected_item_id = str(row["id"])
         path = Path(row["stored_path"])
         collection_names = self.library.item_collection_names(row["id"])
         collection_text = ", ".join(collection_names) if collection_names else "ללא אוסף"
