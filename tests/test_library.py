@@ -170,5 +170,94 @@ class בדיקותספרייה(unittest.TestCase):
     def test_שם_ללא_תוכן_נשאר_קריא(self):
         self.assertGreater(app.relevance("קובץ תמונה", "", "תמונה"), 0)
 
+
+    def test_מועדפים_ואוספים_נשמרים_בין_הפעלות(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "עוגה.txt"
+                source.write_text("עוגת תפוחים\nתפוחים, קמח וסוכר", encoding="utf-8")
+
+                library = app.RecipeLibrary()
+                added, title = library.import_one(source)
+                self.assertTrue(added)
+                item_id = int(library.rows()[0]["id"])
+
+                desserts_id = library.create_collection("  קינוחים  ")
+                shabbat_id = library.create_collection("שבת")
+                library.set_favorite(item_id, True)
+                library.set_item_collection(item_id, desserts_id, True)
+                library.set_item_collection(item_id, shabbat_id, True)
+
+                self.assertEqual(library.item_collection_ids(item_id), {desserts_id, shabbat_id})
+                self.assertEqual(library.item_collection_names(item_id), ["שבת", "קינוחים"])
+                self.assertEqual(len(library.rows(favorite_only=True)), 1)
+                self.assertEqual(len(library.rows(collection_id=desserts_id)), 1)
+                with self.assertRaises(ValueError):
+                    library.create_collection("קינוחים")
+
+                library.db.close()
+                reopened = app.RecipeLibrary()
+                row = reopened.rows()[0]
+                self.assertEqual(row["title"], title)
+                self.assertEqual(row["is_favorite"], 1)
+                self.assertEqual(reopened.item_collection_ids(item_id), {desserts_id, shabbat_id})
+
+                reopened.set_item_collection(item_id, shabbat_id, False)
+                self.assertEqual(reopened.item_collection_names(item_id), ["קינוחים"])
+                reopened.delete_collection(desserts_id)
+                self.assertEqual(reopened.item_collection_ids(item_id), set())
+                self.assertEqual(len(reopened.rows()), 1)
+                reopened.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_שדרוג_מסד_נתונים_ישן_שומר_את_הקבצים(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = temp
+                home = Path(temp) / app.APP_NAME
+                home.mkdir(parents=True)
+                (home / "הקבצים שלי").mkdir()
+                db_path = home / "הספרייה.sqlite3"
+                old_db = app.sqlite3.connect(db_path)
+                old_db.execute("""
+                    CREATE TABLE items(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        title TEXT NOT NULL,
+                        original_name TEXT NOT NULL,
+                        stored_path TEXT NOT NULL,
+                        extension TEXT NOT NULL,
+                        content TEXT NOT NULL DEFAULT '',
+                        digest TEXT NOT NULL UNIQUE,
+                        imported_at TEXT NOT NULL
+                    )
+                """)
+                old_db.execute(
+                    "INSERT INTO items(title,original_name,stored_path,extension,content,digest,imported_at) VALUES(?,?,?,?,?,?,?)",
+                    ("מתכון ישן", "old.txt", "old.txt", ".txt", "תוכן", "legacy-digest", "01/01/2025 10:00")
+                )
+                old_db.commit()
+                old_db.close()
+
+                library = app.RecipeLibrary()
+                self.assertEqual(len(library.rows()), 1)
+                self.assertEqual(library.rows()[0]["title"], "מתכון ישן")
+                self.assertEqual(library.rows()[0]["is_favorite"], 0)
+                self.assertEqual(library.collections(), [])
+                library.set_favorite(1, True)
+                self.assertEqual(library.rows(favorite_only=True)[0]["id"], 1)
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
 if __name__ == "__main__":
     unittest.main()
