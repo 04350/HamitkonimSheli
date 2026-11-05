@@ -1221,16 +1221,18 @@ class App:
 
         table_body = ttk.Frame(table_card, style="Card.TFrame")
         table_body.pack(fill="both", expand=True)
-        columns = ("favorite", "date", "kind", "title")
+        columns = ("favorite", "date", "kind", "size", "title")
         self.tree = ttk.Treeview(table_body, columns=columns, show="headings", selectmode="browse")
         self.tree.heading("favorite", text="★", anchor="center")
         self.tree.heading("date", text="תאריך הוספה", anchor="e")
         self.tree.heading("kind", text="סוג קובץ", anchor="e")
+        self.tree.heading("size", text="גודל", anchor="e")
         self.tree.heading("title", text="שם המתכון או הקובץ", anchor="e")
         self.tree.column("favorite", width=46, minwidth=42, anchor="center", stretch=False)
         self.tree.column("date", width=145, minwidth=125, anchor="e", stretch=False)
         self.tree.column("kind", width=115, minwidth=95, anchor="e", stretch=False)
-        self.tree.column("title", width=510, minwidth=230, anchor="e", stretch=True)
+        self.tree.column("size", width=95, minwidth=80, anchor="e", stretch=False)
+        self.tree.column("title", width=470, minwidth=210, anchor="e", stretch=True)
         scroll = ttk.Scrollbar(table_body, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.tag_configure("even", background=self.colors["surface"])
@@ -1254,12 +1256,40 @@ class App:
         current = self.filter_value.get()
         self._filter_options = options
         self.filter_combo.configure(values=list(options))
-        if current not in options:
-            current = "כל הקבצים"
-        self.filter_value.set(current)
+        self.filter_value.set(current if current in options else "כל הקבצים")
+        categories = ["כל הקטגוריות"] + self.library.all_categories()
+        tags = ["כל התגיות"] + self.library.all_tags()
+        self.category_combo.configure(values=categories)
+        self.tag_combo.configure(values=tags)
+        if self.category_filter_value.get() not in categories:
+            self.category_filter_value.set("כל הקטגוריות")
+        if self.tag_filter_value.get() not in tags:
+            self.tag_filter_value.set("כל התגיות")
 
     def _on_filter_change(self, _event=None):
         self.refresh()
+
+    def _clear_date_filters(self):
+        self.date_from_value.set("")
+        self.date_to_value.set("")
+        self.refresh()
+
+    @staticmethod
+    def _parse_imported_date(value: str):
+        try:
+            return datetime.strptime((value or "").strip(), "%d/%m/%Y %H:%M")
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_date_filter(value: str):
+        value = (value or "").strip()
+        if not value:
+            return None
+        try:
+            return datetime.strptime(value, "%d/%m/%Y").date()
+        except ValueError:
+            return None
 
     def refresh(self):
         selected = self.tree.selection()
@@ -1270,34 +1300,83 @@ class App:
             favorite_only=(mode == "favorites"),
             collection_id=(filter_id if mode == "collection" else None)
         )
-        query = self.search_value.get()
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        query = self.search_value.get().strip()
+        type_filter = self.type_filter_value.get()
+        category_filter = self.category_filter_value.get()
+        tag_filter = self.tag_filter_value.get()
+        date_from = self._parse_date_filter(self.date_from_value.get())
+        date_to = self._parse_date_filter(self.date_to_value.get())
         ranked = []
         for row in rows:
-            score = relevance(row["title"], row["content"], query)
+            kind = file_kind(row["extension"])
+            if type_filter != "כל הסוגים" and kind != type_filter:
+                continue
+            recipe = self.library.get_recipe_data(row["id"])
+            category = recipe.get("category", "")
+            if category_filter != "כל הקטגוריות" and category != category_filter:
+                continue
+            if tag_filter != "כל התגיות" and tag_filter not in self.library.tag_names(row["id"]):
+                continue
+            imported = self._parse_imported_date(row["imported_at"])
+            if date_from and (imported is None or imported.date() < date_from):
+                continue
+            if date_to and (imported is None or imported.date() > date_to):
+                continue
+            search_text = " ".join([
+                row["title"], row["content"], category,
+                " ".join(self.library.tag_names(row["id"]))
+            ])
+            score = relevance(row["title"], search_text, query)
             if score > 0:
-                ranked.append((score, row))
-        ranked.sort(key=lambda pair: (pair[0], pair[1]["id"]), reverse=True)
+                try:
+                    file_size = Path(row["stored_path"]).stat().st_size
+                except OSError:
+                    file_size = 0
+                ranked.append((score, row, file_size, imported))
+        sort_mode = self.sort_value.get()
+        if sort_mode == "שם: א-ת":
+            ranked.sort(key=lambda x: x[1]["title"].casefold())
+        elif sort_mode == "שם: ת-א":
+            ranked.sort(key=lambda x: x[1]["title"].casefold(), reverse=True)
+        elif sort_mode == "תאריך: ישן לחדש":
+            ranked.sort(key=lambda x: x[3] or datetime.min)
+        elif sort_mode == "סוג קובץ":
+            ranked.sort(key=lambda x: (file_kind(x[1]["extension"]), x[1]["title"].casefold()))
+        elif sort_mode == "גודל: גדול לקטן":
+            ranked.sort(key=lambda x: x[2], reverse=True)
+        elif sort_mode == "נצפו לאחרונה":
+            ranked.sort(key=lambda x: x[1]["last_opened"] or "", reverse=True)
+        elif query:
+            ranked.sort(key=lambda x: (x[0], x[1]["id"]), reverse=True)
+        else:
+            ranked.sort(key=lambda x: (x[3] or datetime.min, x[1]["id"]), reverse=True)
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
         self.current_rows = {}
-        for index, (_score, row) in enumerate(ranked):
+        for index, (_score, row, file_size, _imported) in enumerate(ranked):
             iid = str(row["id"])
             self.current_rows[iid] = row
-            ext = file_kind(row["extension"])
             star = "★" if row["is_favorite"] else ""
+            if file_size >= 1024 * 1024:
+                size_label = f"{file_size / (1024 * 1024):.1f} MB"
+            else:
+                size_label = f"{max(1, file_size // 1024)} KB"
             self.tree.insert(
                 "", "end", iid=iid,
-                values=(star, row["imported_at"], ext, row["title"]),
+                values=(star, row["imported_at"], file_kind(row["extension"]), size_label, row["title"]),
                 tags=("even" if index % 2 == 0 else "odd",)
             )
-        self.status_value.set(f"נמצאו {len(ranked)} קבצים בתצוגה הנוכחית.")
+        self.status_value.set(f"נמצאו {len(ranked)} פריטים לפי הסינון הנוכחי.")
         if selected_id and selected_id in self.current_rows:
             self.tree.selection_set(selected_id)
             self.tree.focus(selected_id)
             self.show_selected()
         else:
             self.preview_path = None
+            self.preview_render_path = None
             self.preview_photo = None
+            self._cleanup_preview_temp()
             if self._preview_resize_job is not None:
                 try:
                     self.root.after_cancel(self._preview_resize_job)
