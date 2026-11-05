@@ -1240,8 +1240,9 @@ class App:
 
         table_body = ttk.Frame(table_card, style="Card.TFrame")
         table_body.pack(fill="both", expand=True)
+        self.list_container = ttk.Frame(table_body, style="Card.TFrame")
         columns = ("favorite", "date", "kind", "size", "title")
-        self.tree = ttk.Treeview(table_body, columns=columns, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(self.list_container, columns=columns, show="headings", selectmode="browse")
         self.tree.heading("favorite", text="★", anchor="center")
         self.tree.heading("date", text="תאריך הוספה", anchor="e")
         self.tree.heading("kind", text="סוג קובץ", anchor="e")
@@ -1252,7 +1253,7 @@ class App:
         self.tree.column("kind", width=115, minwidth=95, anchor="e", stretch=False)
         self.tree.column("size", width=95, minwidth=80, anchor="e", stretch=False)
         self.tree.column("title", width=470, minwidth=210, anchor="e", stretch=True)
-        scroll = ttk.Scrollbar(table_body, orient="vertical", command=self.tree.yview)
+        scroll = ttk.Scrollbar(self.list_container, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.tag_configure("even", background=self.colors["surface"])
         self.tree.tag_configure("odd", background=self.colors["row_alt"])
@@ -1274,7 +1275,7 @@ class App:
         if self.view_mode.get() == "גלריה":
             self.gallery_container.pack(fill="both", expand=True)
         else:
-            self.tree.pack(side="right", fill="both", expand=True)
+            self.list_container.pack(fill="both", expand=True)
 
         status_frame = ttk.Frame(outer, padding=(10, 7), style="Card.TFrame")
         status_frame.pack(fill="x", pady=(10, 0))
@@ -1285,11 +1286,11 @@ class App:
         mode = self.view_mode.get()
         self.library.set_setting("view_mode", mode)
         if mode == "גלריה":
-            self.tree.pack_forget()
+            self.list_container.pack_forget()
             self.gallery_container.pack(fill="both", expand=True)
         else:
             self.gallery_container.pack_forget()
-            self.tree.pack(side="right", fill="both", expand=True)
+            self.list_container.pack(fill="both", expand=True)
         self.refresh()
 
     def _bind_gallery_click(self, widget, item_id):
