@@ -144,12 +144,22 @@ def build_recipe_book_docx(recipes, title: str, target: Path, include_notes: boo
             for line in notes.splitlines():
                 if line.strip():
                     add_line(line.strip(), 10, False, space_after=3)
-        if not ingredients and not instructions and source:
-            add_line("תוכן המתכון", 14, True, space_after=5)
-            for line in source.splitlines():
-                if line.strip():
-                    add_line(line.strip(), 10, False, space_after=3)
-        elif not ingredients and not instructions and not notes and not source:
+        if source:
+            known_lines = {
+                re.sub(r"\s+", " ", line.strip()).casefold()
+                for block in (ingredients, instructions)
+                for line in block.splitlines()
+                if line.strip()
+            }
+            remaining_lines = [
+                line.strip() for line in source.splitlines()
+                if line.strip() and re.sub(r"\s+", " ", line.strip()).casefold() not in known_lines
+            ]
+            if remaining_lines:
+                add_line("טקסט נוסף מהקובץ המקורי", 14, True, space_after=5)
+                for line in remaining_lines:
+                    add_line(line, 10, False, space_after=3)
+        elif not ingredients and not instructions and not notes:
             add_line("לא הוזנו פרטי מתכון לפריט זה.", 10)
 
     target = Path(target)
