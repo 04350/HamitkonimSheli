@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import atexit
 import re
 import shutil
 import tempfile
@@ -213,10 +214,11 @@ def build_recipe_book_docx(
     if include_toc:
         add_line("תוכן החוברת", 20, True, space_after=12, color=theme["title"])
         for index, recipe in enumerate(recipes, 1):
+            first_recipe_page = 3 if include_toc else 2
             if layout == "עמוד לכל מתכון":
-                page_number = index + 2
+                page_number = index + first_recipe_page - 1
             elif layout == "כרטיסים קטנים (2 בעמוד)":
-                page_number = ((index - 1) // 2) + 3
+                page_number = ((index - 1) // 2) + first_recipe_page
             else:
                 page_number = "—"
             add_line(f"{index}. {recipe.get('title') or f'מתכון {index}'}  ·  עמוד {page_number}", 11, False, space_after=4)
@@ -470,6 +472,7 @@ class RecipeCenter:
             try:
                 preview_dir = Path(tempfile.mkdtemp(prefix="recipe-print-preview-"))
                 self.preview_dirs.append(preview_dir)
+                atexit.register(shutil.rmtree, preview_dir, ignore_errors=True)
                 preview_path = preview_dir / "תצוגה-מקדימה.pdf"
                 export_recipe_book_pdf(chosen, title_var.get().strip() or "חוברת המתכונים שלי", preview_path, self.converter, **export_options())
                 app.show_viewer(preview_path, "תצוגה מקדימה – חוברת מתכונים")
