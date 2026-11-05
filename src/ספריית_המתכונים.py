@@ -912,7 +912,7 @@ class App:
     def __init__(self):
         self.library = RecipeLibrary()
         self.root = ROOT_CLASS()
-        self.root.title(APP_NAME)
+        self.root.title(f"{APP_NAME} – גרסה {APP_VERSION}")
         try:
             resource_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
             icon_path = resource_root / "assets" / "app_icon.ico"
