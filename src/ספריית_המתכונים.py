@@ -1207,6 +1207,18 @@ class App:
             command=self.open_collections_dialog
         ).pack(side="left", padx=(4, 0))
 
+        detail_filter_frame = ttk.Frame(outer, padding=(12, 7), style="Card.TFrame")
+        detail_filter_frame.pack(fill="x", pady=(0, 10))
+        ttk.Label(detail_filter_frame, text="תיקייה:", style="Panel.TLabel").pack(side="right", padx=(0, 4))
+        self.folder_combo = ttk.Combobox(detail_filter_frame, textvariable=self.folder_filter_value, state="readonly", width=25, justify="right", values=["כל התיקיות"])
+        self.folder_combo.pack(side="right", padx=4)
+        self.folder_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
+        ttk.Label(detail_filter_frame, text="סוג פריטים:", style="Panel.TLabel").pack(side="right", padx=(10, 4))
+        self.recipe_filter_combo = ttk.Combobox(detail_filter_frame, textvariable=self.recipe_filter_value, state="readonly", width=21, justify="right", values=["כל הפריטים", "מתכונים בלבד", "מסמכים וקבצים", "מתכונים חסרים"])
+        self.recipe_filter_combo.pack(side="right", padx=4)
+        self.recipe_filter_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
+        ttk.Button(detail_filter_frame, text="בחירה מרובה / שינוי לקבוצה", command=self.manage_multiple_items).pack(side="left", padx=4)
+
         date_frame = ttk.Frame(outer, padding=(12, 7), style="Card.TFrame")
         date_frame.pack(fill="x", pady=(0, 10))
         ttk.Label(date_frame, text="מתאריך:", style="Panel.TLabel").pack(side="right", padx=(0, 4))
@@ -1301,7 +1313,7 @@ class App:
         table_body.pack(fill="both", expand=True)
         self.list_container = ttk.Frame(table_body, style="Card.TFrame")
         columns = ("favorite", "date", "kind", "size", "title")
-        self.tree = ttk.Treeview(self.list_container, columns=columns, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(self.list_container, columns=columns, show="headings", selectmode="extended")
         self.tree.heading("favorite", text="★", anchor="center")
         self.tree.heading("date", text="תאריך הוספה", anchor="e")
         self.tree.heading("kind", text="סוג קובץ", anchor="e")
@@ -1432,6 +1444,11 @@ class App:
             self.category_filter_value.set("כל הקטגוריות")
         if self.tag_filter_value.get() not in tags:
             self.tag_filter_value.set("כל התגיות")
+        folders = ["כל התיקיות"] + self.library.all_source_folders()
+        if hasattr(self, "folder_combo"):
+            self.folder_combo.configure(values=folders)
+        if self.folder_filter_value.get() not in folders:
+            self.folder_filter_value.set("כל התיקיות")
 
     def _on_filter_change(self, _event=None):
         self.refresh()
@@ -1480,6 +1497,18 @@ class App:
                 continue
             recipe = self.library.get_recipe_data(row["id"])
             category = recipe.get("category", "")
+            folder_path = str(recipe.get("source_folder") or "").strip("/")
+            folder_filter = self.folder_filter_value.get()
+            if folder_filter != "כל התיקיות" and not (folder_path == folder_filter or folder_path.startswith(folder_filter + "/")):
+                continue
+            recipe_filter = self.recipe_filter_value.get()
+            is_recipe = is_recipe_record(recipe, row["content"] or "")
+            if recipe_filter == "מתכונים בלבד" and not is_recipe:
+                continue
+            if recipe_filter == "מסמכים וקבצים" and is_recipe:
+                continue
+            if recipe_filter == "מתכונים חסרים" and (not is_recipe or not recipe_missing_parts(recipe)):
+                continue
             if category_filter != "כל הקטגוריות" and category != category_filter:
                 continue
             if tag_filter != "כל התגיות" and tag_filter not in self.library.tag_names(row["id"]):
@@ -1608,6 +1637,8 @@ class App:
             f"קובץ מקורי: {row['original_name']}\n"
             f"נוסף בתאריך: {row['imported_at']}\n"
             f"קטגוריה: {category or 'ללא קטגוריה'}\n"
+            f"תיקייה: {self.library.get_recipe_data(row['id']).get('source_folder') or 'שורש הספרייה'}\n"
+            f"דירוג אישי: {self.library.get_recipe_data(row['id']).get('rating') or 'ללא דירוג'}\n"
             f"תגיות: {', '.join(tag_names) if tag_names else 'ללא תגיות'}\n"
             f"אוספים: {collection_text}"
         )
