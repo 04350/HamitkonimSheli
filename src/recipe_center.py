@@ -213,7 +213,13 @@ def build_recipe_book_docx(
     if include_toc:
         add_line("תוכן החוברת", 20, True, space_after=12, color=theme["title"])
         for index, recipe in enumerate(recipes, 1):
-            add_line(f"{index}. {recipe.get('title') or f'מתכון {index}'}", 11, False, space_after=4)
+            if layout == "עמוד לכל מתכון":
+                page_number = index + 2
+            elif layout == "כרטיסים קטנים (2 בעמוד)":
+                page_number = ((index - 1) // 2) + 3
+            else:
+                page_number = "—"
+            add_line(f"{index}. {recipe.get('title') or f'מתכון {index}'}  ·  עמוד {page_number}", 11, False, space_after=4)
         document.add_page_break()
 
     for index, recipe in enumerate(recipes):
@@ -354,7 +360,7 @@ class RecipeCenter:
                 "notes": str(data.get("notes") or ""),
                 "content": str(row["content"] or ""),
                 "extension": str(row["extension"] or ""),
-                "image_path": str(row["stored_path"]) if str(row["extension"] or "").lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"} else "",
+                "image_path": str(data.get("image_path") or (row["stored_path"] if str(row["extension"] or "").lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"} else "")),
                 "source_folder": str(data.get("source_folder") or ""),
                 "rating": str(data.get("rating") or ""),
                 "is_recipe": bool(data.get("is_recipe", is_recipe_record(data, row["content"] or ""))),
