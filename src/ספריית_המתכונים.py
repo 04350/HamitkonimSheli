@@ -887,8 +887,15 @@ class App:
             ext = file_kind(row["extension"])
             self.tree.insert("", "end", iid=iid, values=(row["imported_at"], ext, row["title"]), tags=("even" if index % 2 == 0 else "odd",))
         self.status_value.set(f"נמצאו {len(ranked)} קבצים בספרייה.")
+        self.preview_path = None
         self.preview_photo = None
-        self.preview_image.configure(image="", text="בחרו קובץ מהרשימה")
+        if self._preview_resize_job is not None:
+            try:
+                self.root.after_cancel(self._preview_resize_job)
+            except tk.TclError:
+                pass
+            self._preview_resize_job = None
+        self.preview_image.configure(image="", text="בחרו תמונה או קובץ מהרשימה")
         self.detail_label.configure(text="")
 
     def selected_row(self):
