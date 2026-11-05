@@ -365,7 +365,7 @@ class RecipeCenter:
                 "image_path": str(data.get("image_path") or (row["stored_path"] if str(row["extension"] or "").lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"} else "")),
                 "source_folder": str(data.get("source_folder") or ""),
                 "rating": str(data.get("rating") or ""),
-                "is_recipe": bool(data.get("is_recipe", is_recipe_record(data, row["content"] or ""))),
+                "is_recipe": is_recipe_record(data, row["content"] or ""),
                 "history": list(data.get("history") or []),
             }
             self.records.append(record)
