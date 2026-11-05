@@ -54,7 +54,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.1"
+APP_VERSION = "1.3.0"
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 TEXT_TYPES = {".txt", ".md", ".csv", ".tsv", ".log"}
 WORD_TYPES = {".doc", ".docx", ".docm", ".odt", ".rtf"}
@@ -411,6 +411,7 @@ class RecipeLibrary:
         self.db_path = self.home / "הספרייה.sqlite3"
         self.db = sqlite3.connect(self.db_path)
         self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA foreign_keys = ON")
         self.db.execute("""
             CREATE TABLE IF NOT EXISTS items(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -423,7 +424,108 @@ class RecipeLibrary:
                 imported_at TEXT NOT NULL
             )
         """)
+        # Backward-compatible migration: existing libraries keep all their files and gain
+        # a favorites flag with a default of off.
+        item_columns = {
+            row["name"] for row in self.db.execute("PRAGMA table_info(items)").fetchall()
+        }
+        if "is_favorite" not in item_columns:
+            self.db.execute(
+                "ALTER TABLE items ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0"
+            )
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS collections(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                created_at TEXT NOT NULL
+            )
+        """)
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS item_collections(
+                item_id INTEGER NOT NULL,
+                collection_id INTEGER NOT NULL,
+                PRIMARY KEY(item_id, collection_id),
+                FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE,
+                FOREIGN KEY(collection_id) REFERENCES collections(id) ON DELETE CASCADE
+            )
+        """)
         self.db.commit()
+
+    def rows(self, favorite_only: bool = False, collection_id: int | None = None):
+        if collection_id is not None:
+            return self.db.execute("""
+                SELECT items.* FROM items
+                INNER JOIN item_collections ON item_collections.item_id = items.id
+                WHERE item_collections.collection_id = ?
+                ORDER BY items.id DESC
+            """, (int(collection_id),)).fetchall()
+        if favorite_only:
+            return self.db.execute(
+                "SELECT * FROM items WHERE is_favorite = 1 ORDER BY id DESC"
+            ).fetchall()
+        return self.db.execute("SELECT * FROM items ORDER BY id DESC").fetchall()
+
+    def set_favorite(self, item_id: int, is_favorite: bool):
+        self.db.execute(
+            "UPDATE items SET is_favorite = ? WHERE id = ?",
+            (1 if is_favorite else 0, int(item_id))
+        )
+        self.db.commit()
+
+    def create_collection(self, name: str) -> int:
+        clean_name = " ".join((name or "").split())
+        if not clean_name:
+            raise ValueError("צריך להזין שם לאוסף.")
+        if len(clean_name) > 48:
+            raise ValueError("שם האוסף יכול להכיל עד 48 תווים.")
+        try:
+            cursor = self.db.execute(
+                "INSERT INTO collections(name, created_at) VALUES(?, ?)",
+                (clean_name, datetime.now().strftime("%d/%m/%Y %H:%M"))
+            )
+            self.db.commit()
+            return int(cursor.lastrowid)
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("כבר קיים אוסף בשם הזה.") from exc
+
+    def collections(self):
+        return self.db.execute(
+            "SELECT * FROM collections ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+
+    def delete_collection(self, collection_id: int):
+        self.db.execute("DELETE FROM collections WHERE id = ?", (int(collection_id),))
+        self.db.commit()
+
+    def item_collection_ids(self, item_id: int) -> set[int]:
+        rows = self.db.execute(
+            "SELECT collection_id FROM item_collections WHERE item_id = ?",
+            (int(item_id),)
+        ).fetchall()
+        return {int(row["collection_id"]) for row in rows}
+
+    def set_item_collection(self, item_id: int, collection_id: int, assigned: bool):
+        if assigned:
+            self.db.execute(
+                "INSERT OR IGNORE INTO item_collections(item_id, collection_id) VALUES(?, ?)",
+                (int(item_id), int(collection_id))
+            )
+        else:
+            self.db.execute(
+                "DELETE FROM item_collections WHERE item_id = ? AND collection_id = ?",
+                (int(item_id), int(collection_id))
+            )
+        self.db.commit()
+
+    def item_collection_names(self, item_id: int) -> list[str]:
+        rows = self.db.execute("""
+            SELECT collections.name
+            FROM collections
+            INNER JOIN item_collections ON item_collections.collection_id = collections.id
+            WHERE item_collections.item_id = ?
+            ORDER BY collections.name COLLATE NOCASE
+        """, (int(item_id),)).fetchall()
+        return [row["name"] for row in rows]
 
     def import_one(self, source: Path) -> tuple[bool, str]:
         if not source.is_file():
@@ -447,9 +549,6 @@ class RecipeLibrary:
             target.unlink(missing_ok=True)
             raise
         return True, title
-
-    def rows(self):
-        return self.db.execute("SELECT * FROM items ORDER BY id DESC").fetchall()
 
     def remove(self, item_id: int):
         row = self.db.execute("SELECT stored_path FROM items WHERE id=?", (item_id,)).fetchone()
@@ -485,6 +584,9 @@ class App:
         self.style = ttk.Style(self.root)
         self._apply_styles()
         self.search_value = tk.StringVar()
+        self.filter_value = tk.StringVar(value="כל הקבצים")
+        self._filter_options = {}
+        self.favorite_button = None
         self.status_value = tk.StringVar(value="ברוכים הבאים! אפשר להוסיף קבצים או לגרור אותם לחלון.")
         self.preview_photo = None
         self.preview_path = None
@@ -651,6 +753,21 @@ class App:
             style = "Primary.TButton" if label.startswith("＋") else "TButton"
             ttk.Button(toolbar, text=label, command=command, style=style).pack(side="right", padx=(0, 7))
 
+        # Quick filters for the entire library, favorites, and personal collections.
+        filter_frame = ttk.Frame(outer, padding=(12, 9), style="Card.TFrame")
+        filter_frame.pack(fill="x", pady=(0, 12))
+        ttk.Label(filter_frame, text="הצגת קבצים:", style="Panel.TLabel").pack(side="right", padx=(0, 10))
+        self.filter_combo = ttk.Combobox(
+            filter_frame, textvariable=self.filter_value,
+            state="readonly", width=30, justify="right"
+        )
+        self.filter_combo.pack(side="right", padx=4)
+        self.filter_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
+        ttk.Button(
+            filter_frame, text="📁  ניהול אוספים",
+            command=self.open_collections_dialog
+        ).pack(side="left", padx=(4, 0))
+
         # Resizable work area: preview on the left, file list on the right.
         body = ttk.Frame(outer, style="App.TFrame")
         body.pack(fill="both", expand=True)
@@ -682,6 +799,17 @@ class App:
             justify="right", anchor="e", wraplength=430
         )
         self.detail_label.pack(fill="x", pady=(0, 9))
+        selection_tools = ttk.Frame(preview, style="Card.TFrame")
+        selection_tools.pack(fill="x", pady=(0, 7))
+        self.favorite_button = ttk.Button(
+            selection_tools, text="☆ הוספה למועדפים",
+            command=self.toggle_favorite
+        )
+        self.favorite_button.pack(side="right", fill="x", expand=True, padx=(0, 4))
+        ttk.Button(
+            selection_tools, text="📁 שיוך לאוספים",
+            command=self.open_collections_dialog
+        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
         ttk.Button(
             preview, text="פתיחת הקובץ  ↗", command=self.open_selected,
             style="Primary.TButton"
@@ -706,11 +834,13 @@ class App:
 
         table_body = ttk.Frame(table_card, style="Card.TFrame")
         table_body.pack(fill="both", expand=True)
-        columns = ("date", "kind", "title")
+        columns = ("favorite", "date", "kind", "title")
         self.tree = ttk.Treeview(table_body, columns=columns, show="headings", selectmode="browse")
+        self.tree.heading("favorite", text="★", anchor="center")
         self.tree.heading("date", text="תאריך הוספה", anchor="e")
         self.tree.heading("kind", text="סוג קובץ", anchor="e")
         self.tree.heading("title", text="שם המתכון או הקובץ", anchor="e")
+        self.tree.column("favorite", width=46, minwidth=42, anchor="center", stretch=False)
         self.tree.column("date", width=145, minwidth=125, anchor="e", stretch=False)
         self.tree.column("kind", width=115, minwidth=95, anchor="e", stretch=False)
         self.tree.column("title", width=510, minwidth=230, anchor="e", stretch=True)
@@ -727,11 +857,35 @@ class App:
         status_frame.pack(fill="x", pady=(10, 0))
         ttk.Label(status_frame, textvariable=self.status_value, style="Status.TLabel", anchor="e").pack(fill="x")
 
+    def _update_filter_options(self):
+        options = {
+            "כל הקבצים": ("all", None),
+            "★ מועדפים": ("favorites", None),
+        }
+        for collection in self.library.collections():
+            options[f"📁 {collection['name']}"] = ("collection", int(collection["id"]))
+        current = self.filter_value.get()
+        self._filter_options = options
+        self.filter_combo.configure(values=list(options))
+        if current not in options:
+            current = "כל הקבצים"
+        self.filter_value.set(current)
+
+    def _on_filter_change(self, _event=None):
+        self.refresh()
+
     def refresh(self):
+        selected = self.tree.selection()
+        selected_id = selected[0] if selected else None
+        self._update_filter_options()
+        mode, filter_id = self._filter_options.get(self.filter_value.get(), ("all", None))
+        rows = self.library.rows(
+            favorite_only=(mode == "favorites"),
+            collection_id=(filter_id if mode == "collection" else None)
+        )
         query = self.search_value.get()
         for item in self.tree.get_children():
             self.tree.delete(item)
-        rows = self.library.rows()
         ranked = []
         for row in rows:
             score = relevance(row["title"], row["content"], query)
@@ -743,22 +897,29 @@ class App:
             iid = str(row["id"])
             self.current_rows[iid] = row
             ext = file_kind(row["extension"])
+            star = "★" if row["is_favorite"] else ""
             self.tree.insert(
                 "", "end", iid=iid,
-                values=(row["imported_at"], ext, row["title"]),
+                values=(star, row["imported_at"], ext, row["title"]),
                 tags=("even" if index % 2 == 0 else "odd",)
             )
-        self.status_value.set(f"נמצאו {len(ranked)} קבצים בספרייה.")
-        self.preview_path = None
-        self.preview_photo = None
-        if self._preview_resize_job is not None:
-            try:
-                self.root.after_cancel(self._preview_resize_job)
-            except tk.TclError:
-                pass
-            self._preview_resize_job = None
-        self._set_preview_placeholder("בחרו תמונה או קובץ מהרשימה")
-        self.detail_label.configure(text="")
+        self.status_value.set(f"נמצאו {len(ranked)} קבצים בתצוגה הנוכחית.")
+        if selected_id and selected_id in self.current_rows:
+            self.tree.selection_set(selected_id)
+            self.tree.focus(selected_id)
+            self.show_selected()
+        else:
+            self.preview_path = None
+            self.preview_photo = None
+            if self._preview_resize_job is not None:
+                try:
+                    self.root.after_cancel(self._preview_resize_job)
+                except tk.TclError:
+                    pass
+                self._preview_resize_job = None
+            self._set_preview_placeholder("בחרו תמונה או קובץ מהרשימה")
+            self.detail_label.configure(text="")
+            self._update_selection_actions(None)
 
     def selected_row(self):
         selected = self.tree.selection()
@@ -778,13 +939,32 @@ class App:
             width=max(160, width - 40), tags=("preview-placeholder",)
         )
 
+    def _update_selection_actions(self, row):
+        if self.favorite_button is None:
+            return
+        if row is None:
+            self.favorite_button.configure(text="☆ הוספה למועדפים", state="disabled")
+        elif row["is_favorite"]:
+            self.favorite_button.configure(text="★ הסרה מהמועדפים", state="normal")
+        else:
+            self.favorite_button.configure(text="☆ הוספה למועדפים", state="normal")
+
     def show_selected(self, _event=None):
         row = self.selected_row()
         if not row:
+            self._update_selection_actions(None)
             return
         path = Path(row["stored_path"])
-        info = f"שם: {row['title']}\nקובץ מקורי: {row['original_name']}\nנוסף בתאריך: {row['imported_at']}"
+        collection_names = self.library.item_collection_names(row["id"])
+        collection_text = ", ".join(collection_names) if collection_names else "ללא אוסף"
+        info = (
+            f"שם: {row['title']}\n"
+            f"קובץ מקורי: {row['original_name']}\n"
+            f"נוסף בתאריך: {row['imported_at']}\n"
+            f"אוספים: {collection_text}"
+        )
         self.detail_label.configure(text=info)
+        self._update_selection_actions(row)
         self.preview_photo = None
         self.preview_path = path if path.suffix.lower() in IMAGE_TYPES and Image is not None else None
         if self.preview_path is not None:
@@ -792,6 +972,110 @@ class App:
             self.root.after_idle(self._render_selected_image)
             return
         self._set_preview_placeholder("אין תצוגה מקדימה לקובץ הזה")
+
+    def toggle_favorite(self):
+        row = self.selected_row()
+        if not row:
+            return
+        self.library.set_favorite(row["id"], not bool(row["is_favorite"]))
+        self.status_value.set(
+            "הפריט נוסף למועדפים." if not row["is_favorite"] else "הפריט הוסר מהמועדפים."
+        )
+        self.refresh()
+
+    def open_collections_dialog(self):
+        row = self.selected_row()
+        item_id = int(row["id"]) if row else None
+        dialog = tk.Toplevel(self.root)
+        dialog.title("ניהול אוספים")
+        dialog.geometry("500x540")
+        dialog.minsize(420, 360)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(background=self.colors["background"])
+
+        outer = ttk.Frame(dialog, padding=18, style="App.TFrame")
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text="האוספים שלי", style="Section.TLabel").pack(fill="x", anchor="e")
+        description = (
+            f"סמנו באילו אוספים יופיע הפריט: {row['title']}"
+            if row else "כאן אפשר ליצור אוספים, למחוק אוספים ולנהל את החלוקה האישית."
+        )
+        ttk.Label(
+            outer, text=description, style="Muted.TLabel",
+            wraplength=440, justify="right"
+        ).pack(fill="x", anchor="e", pady=(4, 12))
+
+        list_frame = ttk.Frame(outer, padding=10, style="Card.TFrame")
+        list_frame.pack(fill="both", expand=True)
+
+        def rebuild_list():
+            for child in list_frame.winfo_children():
+                child.destroy()
+            collections = self.library.collections()
+            if not collections:
+                ttk.Label(
+                    list_frame, text="עדיין לא יצרתם אוספים.\nלחצו על ״יצירת אוסף חדש״ כדי להתחיל.",
+                    style="Muted.TLabel", justify="center"
+                ).pack(fill="both", expand=True, pady=22)
+                return
+            assigned = self.library.item_collection_ids(item_id) if item_id is not None else set()
+            for collection in collections:
+                collection_id = int(collection["id"])
+                line = ttk.Frame(list_frame, style="Card.TFrame")
+                line.pack(fill="x", pady=4)
+                if item_id is not None:
+                    variable = tk.BooleanVar(value=collection_id in assigned)
+                    def on_toggle(cid=collection_id, var=variable):
+                        self.library.set_item_collection(item_id, cid, var.get())
+                        self.refresh()
+                    ttk.Checkbutton(
+                        line, text=collection["name"], variable=variable,
+                        command=on_toggle
+                    ).pack(side="right", fill="x", expand=True)
+                else:
+                    ttk.Label(
+                        line, text=collection["name"], style="Panel.TLabel"
+                    ).pack(side="right", fill="x", expand=True)
+                def delete_collection(cid=collection_id, name=collection["name"]):
+                    if messagebox.askyesno(
+                        "מחיקת אוסף",
+                        f"למחוק את האוסף ״{name}״?\nהקבצים עצמם לא יימחקו.",
+                        parent=dialog
+                    ):
+                        self.library.delete_collection(cid)
+                        self._update_filter_options()
+                        self.refresh()
+                        rebuild_list()
+                ttk.Button(
+                    line, text="מחיקה", style="Danger.TButton",
+                    command=delete_collection
+                ).pack(side="left", padx=(6, 0))
+
+        def create_collection():
+            name = simpledialog.askstring(
+                "יצירת אוסף", "מה יהיה שם האוסף החדש?",
+                parent=dialog
+            )
+            if name is None:
+                return
+            try:
+                self.library.create_collection(name)
+            except ValueError as exc:
+                messagebox.showwarning("לא ניתן ליצור אוסף", str(exc), parent=dialog)
+                return
+            self._update_filter_options()
+            rebuild_list()
+            self.status_value.set("האוסף החדש נוצר.")
+
+        rebuild_list()
+        buttons = ttk.Frame(outer, style="App.TFrame")
+        buttons.pack(fill="x", pady=(12, 0))
+        ttk.Button(
+            buttons, text="＋ יצירת אוסף חדש",
+            style="Primary.TButton", command=create_collection
+        ).pack(side="right")
+        ttk.Button(buttons, text="סגירה", command=dialog.destroy).pack(side="left")
 
     def _schedule_preview_resize(self, _event=None):
         if self.preview_path is None:
