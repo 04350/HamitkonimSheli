@@ -404,6 +404,76 @@ def relevance(title: str, content: str, query: str) -> int:
         return int(ratio * 100)
     return 0
 
+
+def extract_ingredients(text: str) -> str:
+    """Conservatively collect likely ingredient lines from extracted recipe text."""
+    units = ("גרם", "קילו", "ק\"ג", "מ\"ל", "ליטר", "כוס", "כפות", "כף",
+             "כפית", "כפיות", "שיניים", "יחידות", "ביצים", "ביצה",
+             "חבילה", "שקית", "קורט")
+    candidates = []
+    for raw in (text or "").splitlines():
+        line = re.sub(r"^\s*(?:[-*•▪●]|\d+[.)])\s*", "", raw).strip()
+        if not line or len(line) > 180:
+            continue
+        if any(word in line for word in ("אופן ההכנה", "הוראות הכנה", "שלבי הכנה")):
+            continue
+        starts_with_quantity = bool(re.match(r"^(?:\d+(?:[.,]\d+)?(?:\s*/\s*\d+)?|[½¼¾⅓⅔⅛⅜⅝⅞])\s*", line))
+        has_unit = any(unit in line for unit in units)
+        if starts_with_quantity or has_unit:
+            candidates.append(line)
+        if len(candidates) >= 60:
+            break
+    return "\n".join(candidates)
+
+
+def scale_ingredient_amounts(text: str, base_servings: int, target_servings: int) -> str:
+    base = max(1, int(base_servings))
+    target = max(1, int(target_servings))
+    factor = target / base
+    fractions = {"½": 0.5, "¼": 0.25, "¾": 0.75, "⅓": 1/3, "⅔": 2/3,
+                 "⅛": 0.125, "⅜": 0.375, "⅝": 0.625, "⅞": 0.875}
+    pattern = re.compile(r"^(\s*)(\d+\s*/\s*\d+|\d+(?:[.,]\d+)?|[½¼¾⅓⅔⅛⅜⅝⅞])(\s*)(.*)$")
+    output = []
+    for line in (text or "").splitlines():
+        match = pattern.match(line)
+        if not match:
+            output.append(line)
+            continue
+        prefix, raw, spacing, rest = match.groups()
+        clean = raw.replace(" ", "").replace(",", ".")
+        if clean in fractions:
+            amount = fractions[clean]
+        elif "/" in clean:
+            numerator, denominator = clean.split("/", 1)
+            try:
+                amount = float(numerator) / float(denominator)
+            except (ValueError, ZeroDivisionError):
+                output.append(line)
+                continue
+        else:
+            try:
+                amount = float(clean)
+            except ValueError:
+                output.append(line)
+                continue
+        result = round(amount * factor, 2)
+        formatted = str(int(result)) if float(result).is_integer() else f"{result:.2f}".rstrip("0").rstrip(".")
+        output.append(f"{prefix}{formatted}{spacing}{rest}")
+    return "\n".join(output)
+
+
+def text_similarity(left: str, right: str) -> float:
+    a = normalize((left or "")[:3500])
+    b = normalize((right or "")[:3500])
+    if not a or not b:
+        return 0.0
+    a_words, b_words = set(a.split()), set(b.split())
+    union = a_words | b_words
+    overlap = len(a_words & b_words) / len(union) if union else 0.0
+    sequence = SequenceMatcher(None, a[:1800], b[:1800]).ratio()
+    return max(overlap, sequence * 0.85)
+
+
 class RecipeLibrary:
     def __init__(self):
         self.home = data_home()
