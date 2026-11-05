@@ -400,7 +400,8 @@ class בדיקותספרייה(unittest.TestCase):
                 {
                     "title": "עוגת תפוחים",
                     "ingredients": "2 כוסות קמח\n3 תפוחים",
-                    "instructions": "מערבבים את החומרים\nאופים בתנור",
+                    "instructions": "",
+                    "content": "עוגת תפוחים\n2 כוסות קמח\nאופן ההכנה:\nמערבבים את החומרים\nאופים בתנור",
                     "notes": "להגיש קר",
                     "servings": "8",
                 }
@@ -410,7 +411,8 @@ class בדיקותספרייה(unittest.TestCase):
             text = "\n".join(paragraph.text for paragraph in document.paragraphs)
             self.assertIn("עוגת תפוחים", text)
             self.assertIn("2 כוסות קמח", text)
-            self.assertIn("הוראות הכנה", text)
+            self.assertIn("טקסט נוסף מהקובץ המקורי", text)
+            self.assertIn("מערבבים את החומרים", text)
             self.assertIn("הערות אישיות", text)
             self.assertIn("w:bidi", document.paragraphs[0]._p.xml)
 
