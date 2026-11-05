@@ -412,7 +412,7 @@ class בדיקותספרייה(unittest.TestCase):
             self.assertIn("2 כוסות קמח", text)
             self.assertIn("הוראות הכנה", text)
             self.assertIn("הערות אישיות", text)
-            self.assertIn("w:bidi", document.paragraphs[1]._p.xml)
+            self.assertIn("w:bidi", document.paragraphs[0]._p.xml)
 
     @unittest.skipUnless(
         app.find_libreoffice() is not None and app.fitz is not None,
