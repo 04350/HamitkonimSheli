@@ -1680,7 +1680,7 @@ class App:
 
     def _maybe_auto_backup(self):
         try:
-            enabled = self.library.get_setting("auto_backup_enabled", "1") == "1"
+            enabled = self.library.get_setting("auto_backup_enabled", "0") == "1"
             interval = max(1, min(90, int(self.library.get_setting("auto_backup_days", "7"))))
             last_value = self.library.get_setting("last_auto_backup", "")
             last_time = None
@@ -2351,7 +2351,7 @@ class App:
         theme_var = tk.StringVar(value=self.library.get_setting("color_theme", "כחול"))
         font_var = tk.StringVar(value=self.library.get_setting("font_size", "10"))
         zoom_var = tk.StringVar(value=self.library.get_setting("preview_zoom", "1.0"))
-        auto_var = tk.BooleanVar(value=self.library.get_setting("auto_backup_enabled", "1") == "1")
+        auto_var = tk.BooleanVar(value=self.library.get_setting("auto_backup_enabled", "0") == "1")
         days_var = tk.StringVar(value=self.library.get_setting("auto_backup_days", "7"))
 
         def option_row(title, variable, values, width=18):
@@ -2395,8 +2395,11 @@ class App:
             self.library.set_setting("color_theme", theme_var.get())
             self.library.set_setting("font_size", str(font))
             self.library.set_setting("preview_zoom", str(zoom))
+            was_enabled = self.library.get_setting("auto_backup_enabled", "0") == "1"
             self.library.set_setting("auto_backup_enabled", "1" if auto_var.get() else "0")
             self.library.set_setting("auto_backup_days", str(days))
+            if auto_var.get() and not was_enabled and not self.library.get_setting("last_auto_backup", ""):
+                self.library.set_setting("last_auto_backup", datetime.now().isoformat(timespec="seconds"))
             self._apply_styles()
             self._set_preview_placeholder("בחרו תמונה או קובץ מהרשימה") if not self.preview_path else self._render_selected_preview()
             self.status_value.set("ההגדרות נשמרו.")
@@ -2410,6 +2413,12 @@ class App:
 
     def close(self):
         try:
+            if self._auto_backup_job is not None:
+                try:
+                    self.root.after_cancel(self._auto_backup_job)
+                except tk.TclError:
+                    pass
+            self._cleanup_preview_temp()
             self.library.db.commit()
             self.library.db.close()
         finally:
