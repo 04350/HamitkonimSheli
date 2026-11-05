@@ -720,9 +720,14 @@ class RecipeLibrary:
                         destination = temp_db
                     elif name.startswith("הקבצים שלי/"):
                         relative = name[len("הקבצים שלי/"):]
-                        if not relative:
+                        parts = [part for part in relative.split("/") if part not in ("", ".")]
+                        if not parts:
                             continue
-                        destination = extracted_files / relative
+                        if any(part == ".." or ":" in part for part in parts):
+                            raise ValueError("הגיבוי מכיל נתיב קובץ שאינו בטוח.")
+                        destination = extracted_files.joinpath(*parts)
+                        if not destination.resolve().is_relative_to(extracted_files.resolve()):
+                            raise ValueError("הגיבוי מכיל נתיב קובץ מחוץ לתיקיית הספרייה.")
                     else:
                         continue
                     if info.is_dir():
@@ -985,7 +990,7 @@ class App:
             foreground=c["navy"], font=("Segoe UI", 12, "bold")
         )
         self.style.configure(
-            "TButton", font=("Segoe UI", 9, "bold"), padding=(14, 10),
+            "TButton", font=("Segoe UI", max(8, font_size - 1), "bold"), padding=(14, 10),
             background="#E8EEF5", foreground=c["navy"],
             bordercolor=c["border"], focuscolor=c["accent"], relief="flat"
         )
@@ -1449,15 +1454,6 @@ class App:
                 self.preview_notice = notice
         self._set_preview_placeholder("טוען תצוגה מקדימה…")
         self.root.after_idle(self._render_selected_preview)
-
-    def _put_preview_image(self, photo, width: int, height: int):
-        self.preview_photo = photo
-        self.preview_image.delete("all")
-        self.preview_image.create_image(
-            width // 2, height // 2,
-            image=self.preview_photo, anchor="center",
-            tags=("preview-image",)
-        )
 
     def toggle_favorite(self):
         row = self.selected_row()
