@@ -19,7 +19,7 @@ import subprocess
 import webbrowser
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from html.parser import HTMLParser
 import tkinter as tk
@@ -54,7 +54,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 TEXT_TYPES = {".txt", ".md", ".csv", ".tsv", ".log"}
 WORD_TYPES = {".doc", ".docx", ".docm", ".odt", ".rtf"}
@@ -408,9 +408,17 @@ class RecipeLibrary:
     def __init__(self):
         self.home = data_home()
         self.files_dir = self.home / "הקבצים שלי"
+        self.recycle_dir = self.home / "סל המחזור"
+        self.backup_dir = self.home / "גיבויים"
+        self.files_dir.mkdir(parents=True, exist_ok=True)
+        self.recycle_dir.mkdir(parents=True, exist_ok=True)
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.home / "הספרייה.sqlite3"
         self.db = sqlite3.connect(self.db_path)
         self.db.row_factory = sqlite3.Row
+        self._ensure_schema()
+
+    def _ensure_schema(self):
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.execute("""
             CREATE TABLE IF NOT EXISTS items(
@@ -424,15 +432,19 @@ class RecipeLibrary:
                 imported_at TEXT NOT NULL
             )
         """)
-        # Backward-compatible migration: existing libraries keep all their files and gain
-        # a favorites flag with a default of off.
-        item_columns = {
+        columns = {
             row["name"] for row in self.db.execute("PRAGMA table_info(items)").fetchall()
         }
-        if "is_favorite" not in item_columns:
-            self.db.execute(
-                "ALTER TABLE items ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0"
-            )
+        migrations = {
+            "is_favorite": "INTEGER NOT NULL DEFAULT 0",
+            "is_deleted": "INTEGER NOT NULL DEFAULT 0",
+            "deleted_at": "TEXT NOT NULL DEFAULT ''",
+            "last_opened": "TEXT NOT NULL DEFAULT ''",
+            "recipe_data": "TEXT NOT NULL DEFAULT '{}'",
+        }
+        for name, declaration in migrations.items():
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE items ADD COLUMN {name} {declaration}")
         self.db.execute("""
             CREATE TABLE IF NOT EXISTS collections(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -449,21 +461,270 @@ class RecipeLibrary:
                 FOREIGN KEY(collection_id) REFERENCES collections(id) ON DELETE CASCADE
             )
         """)
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS tags(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE
+            )
+        """)
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS item_tags(
+                item_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                PRIMARY KEY(item_id, tag_id),
+                FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE,
+                FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE
+            )
+        """)
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings(
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
         self.db.commit()
 
-    def rows(self, favorite_only: bool = False, collection_id: int | None = None):
-        if collection_id is not None:
-            return self.db.execute("""
-                SELECT items.* FROM items
-                INNER JOIN item_collections ON item_collections.item_id = items.id
-                WHERE item_collections.collection_id = ?
-                ORDER BY items.id DESC
-            """, (int(collection_id),)).fetchall()
+    def rows(self, favorite_only: bool = False, collection_id: int | None = None, include_deleted: bool = False):
+        conditions = []
+        params = []
+        if not include_deleted:
+            conditions.append("items.is_deleted = 0")
         if favorite_only:
-            return self.db.execute(
-                "SELECT * FROM items WHERE is_favorite = 1 ORDER BY id DESC"
-            ).fetchall()
-        return self.db.execute("SELECT * FROM items ORDER BY id DESC").fetchall()
+            conditions.append("items.is_favorite = 1")
+        if collection_id is not None:
+            conditions.append("EXISTS (SELECT 1 FROM item_collections ic WHERE ic.item_id=items.id AND ic.collection_id=?)")
+            params.append(int(collection_id))
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        return self.db.execute(
+            "SELECT items.* FROM items" + where + " ORDER BY items.id DESC",
+            params
+        ).fetchall()
+
+    def recycled_rows(self):
+        return self.db.execute(
+            "SELECT * FROM items WHERE is_deleted = 1 ORDER BY deleted_at DESC, id DESC"
+        ).fetchall()
+
+    def move_to_recycle_bin(self, item_id: int):
+        self.db.execute(
+            "UPDATE items SET is_deleted=1, deleted_at=? WHERE id=? AND is_deleted=0",
+            (datetime.now().strftime("%d/%m/%Y %H:%M"), int(item_id))
+        )
+        self.db.commit()
+
+    def restore_from_recycle_bin(self, item_id: int):
+        self.db.execute(
+            "UPDATE items SET is_deleted=0, deleted_at='' WHERE id=? AND is_deleted=1",
+            (int(item_id),)
+        )
+        self.db.commit()
+
+    def permanently_delete(self, item_id: int):
+        row = self.db.execute(
+            "SELECT stored_path FROM items WHERE id=? AND is_deleted=1", (int(item_id),)
+        ).fetchone()
+        if row:
+            Path(row["stored_path"]).unlink(missing_ok=True)
+            self.db.execute("DELETE FROM items WHERE id=?", (int(item_id),))
+            self.db.commit()
+
+    def set_favorite(self, item_id: int, is_favorite: bool):
+        self.db.execute(
+            "UPDATE items SET is_favorite = ? WHERE id = ?",
+            (1 if is_favorite else 0, int(item_id))
+        )
+        self.db.commit()
+
+    def record_opened(self, item_id: int):
+        self.db.execute(
+            "UPDATE items SET last_opened=? WHERE id=?",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(item_id))
+        )
+        self.db.commit()
+
+    def get_recipe_data(self, item_id: int) -> dict:
+        row = self.db.execute("SELECT recipe_data FROM items WHERE id=?", (int(item_id),)).fetchone()
+        if not row:
+            return {}
+        try:
+            value = json.loads(row["recipe_data"] or "{}")
+            return value if isinstance(value, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+
+    def set_recipe_data(self, item_id: int, data: dict):
+        allowed = {"category", "ingredients", "instructions", "prep_minutes", "cook_minutes", "servings", "notes"}
+        clean = {key: data.get(key, "") for key in allowed}
+        self.db.execute(
+            "UPDATE items SET recipe_data=? WHERE id=?",
+            (json.dumps(clean, ensure_ascii=False), int(item_id))
+        )
+        self.db.commit()
+
+    def tag_names(self, item_id: int) -> list[str]:
+        rows = self.db.execute("""
+            SELECT tags.name FROM tags
+            INNER JOIN item_tags ON item_tags.tag_id=tags.id
+            WHERE item_tags.item_id=? ORDER BY tags.name COLLATE NOCASE
+        """, (int(item_id),)).fetchall()
+        return [row["name"] for row in rows]
+
+    def all_tags(self) -> list[str]:
+        return [row["name"] for row in self.db.execute("SELECT name FROM tags ORDER BY name COLLATE NOCASE")]
+
+    def all_categories(self) -> list[str]:
+        values = set()
+        for row in self.db.execute("SELECT recipe_data FROM items WHERE is_deleted=0"):
+            try:
+                category = json.loads(row["recipe_data"] or "{}").get("category", "").strip()
+            except (ValueError, AttributeError):
+                category = ""
+            if category:
+                values.add(category)
+        return sorted(values, key=str.casefold)
+
+    def set_item_tags(self, item_id: int, names):
+        cleaned = []
+        for name in names:
+            value = " ".join(str(name).split()).strip()
+            if value and value.casefold() not in {x.casefold() for x in cleaned}:
+                cleaned.append(value[:32])
+        self.db.execute("DELETE FROM item_tags WHERE item_id=?", (int(item_id),))
+        for name in cleaned:
+            self.db.execute("INSERT OR IGNORE INTO tags(name) VALUES(?)", (name,))
+            tag = self.db.execute("SELECT id FROM tags WHERE name=? COLLATE NOCASE", (name,)).fetchone()
+            self.db.execute(
+                "INSERT OR IGNORE INTO item_tags(item_id,tag_id) VALUES(?,?)",
+                (int(item_id), int(tag["id"]))
+            )
+        self.db.commit()
+
+    def set_setting(self, key: str, value: str):
+        self.db.execute(
+            "INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(key), str(value))
+        )
+        self.db.commit()
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        row = self.db.execute("SELECT value FROM app_settings WHERE key=?", (str(key),)).fetchone()
+        return str(row["value"]) if row else str(default)
+
+    def create_backup(self, target: Path):
+        target = Path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="recipe-backup-") as temp:
+            db_copy = Path(temp) / "library.sqlite3"
+            backup_db = sqlite3.connect(db_copy)
+            try:
+                self.db.commit()
+                self.db.backup(backup_db)
+            finally:
+                backup_db.close()
+            with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.write(db_copy, "הספרייה.sqlite3")
+                for path in self.files_dir.rglob("*"):
+                    if path.is_file():
+                        archive.write(path, "הקבצים שלי/" + path.relative_to(self.files_dir).as_posix())
+
+    def restore_backup(self, source: Path) -> int:
+        source = Path(source)
+        if not source.is_file() or not zipfile.is_zipfile(source):
+            raise ValueError("קובץ הגיבוי אינו ZIP תקין.")
+        temp_root = Path(tempfile.mkdtemp(prefix="recipe-restore-", dir=self.home))
+        temp_db = temp_root / "הספרייה.sqlite3"
+        extracted_files = temp_root / "הקבצים שלי"
+        extracted_files.mkdir()
+        total_size = 0
+        try:
+            with zipfile.ZipFile(source, "r") as archive:
+                names = archive.namelist()
+                if "הספרייה.sqlite3" not in names:
+                    raise ValueError("הגיבוי לא מכיל את מסד הנתונים של הספרייה.")
+                for info in archive.infolist():
+                    name = info.filename.replace("\\\\", "/")
+                    parts = Path(name).parts
+                    if name.startswith("/") or ".." in parts or (len(parts) and ":" in parts[0]):
+                        raise ValueError("הגיבוי מכיל נתיב קובץ שאינו בטוח.")
+                    if name == "הספרייה.sqlite3":
+                        destination = temp_db
+                    elif name.startswith("הקבצים שלי/"):
+                        relative = name[len("הקבצים שלי/"):]
+                        if not relative:
+                            continue
+                        destination = extracted_files / relative
+                    else:
+                        continue
+                    if info.is_dir():
+                        destination.mkdir(parents=True, exist_ok=True)
+                        continue
+                    total_size += info.file_size
+                    if total_size > 2 * 1024 * 1024 * 1024:
+                        raise ValueError("הגיבוי גדול מדי לשחזור.")
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(info) as src, destination.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+            if not temp_db.is_file():
+                raise ValueError("מסד הנתונים לא חולץ.")
+            check_db = sqlite3.connect(temp_db)
+            check_db.row_factory = sqlite3.Row
+            integrity = check_db.execute("PRAGMA quick_check").fetchone()[0]
+            if integrity != "ok":
+                check_db.close()
+                raise ValueError("מסד הנתונים שבגיבוי אינו תקין.")
+            if not check_db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='items'").fetchone():
+                check_db.close()
+                raise ValueError("הקובץ אינו גיבוי של ספריית המתכונים.")
+            rows = check_db.execute("SELECT id,stored_path FROM items").fetchall()
+            for row in rows:
+                filename = Path(str(row["stored_path"])).name
+                if filename and (extracted_files / filename).is_file():
+                    check_db.execute(
+                        "UPDATE items SET stored_path=? WHERE id=?",
+                        (str(self.files_dir / filename), int(row["id"]))
+                    )
+            check_db.commit()
+            check_db.close()
+
+            old_files = temp_root / "old_files"
+            old_db = temp_root / "old_library.sqlite3"
+            self.db.commit()
+            self.db.close()
+            moved_old_files = False
+            moved_old_db = False
+            try:
+                if self.files_dir.exists():
+                    os.replace(self.files_dir, old_files)
+                    moved_old_files = True
+                if self.db_path.exists():
+                    os.replace(self.db_path, old_db)
+                    moved_old_db = True
+                os.replace(extracted_files, self.files_dir)
+                shutil.copy2(temp_db, self.db_path)
+                self.db = sqlite3.connect(self.db_path)
+                self.db.row_factory = sqlite3.Row
+                self._ensure_schema()
+            except Exception:
+                try:
+                    if hasattr(self, "db"):
+                        self.db.close()
+                except Exception:
+                    pass
+                if self.files_dir.exists():
+                    shutil.rmtree(self.files_dir, ignore_errors=True)
+                if self.db_path.exists():
+                    self.db_path.unlink(missing_ok=True)
+                if moved_old_files:
+                    os.replace(old_files, self.files_dir)
+                if moved_old_db:
+                    os.replace(old_db, self.db_path)
+                self.db = sqlite3.connect(self.db_path)
+                self.db.row_factory = sqlite3.Row
+                self._ensure_schema()
+                raise
+            return len(rows)
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
 
     def set_favorite(self, item_id: int, is_favorite: bool):
         self.db.execute(
