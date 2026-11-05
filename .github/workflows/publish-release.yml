@@ -17,12 +17,39 @@ permissions:
   actions: read
   contents: write
 
+concurrency:
+  group: publish-latest-windows-release
+  cancel-in-progress: true
+
 jobs:
   publish:
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_sha == github.sha)
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
+      - name: בדיקת הקומיט העדכני בענף הראשי
+        if: github.event_name == 'workflow_run'
+        id: current
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: מניעת פרסום בנייה ישנה
+        if: github.event_name == 'workflow_run'
+        id: latest_check
+        shell: bash
+        run: |
+          current_sha="$(git rev-parse HEAD)"
+          source_sha="${{ github.event.workflow_run.head_sha }}"
+          if [ "$current_sha" = "$source_sha" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "A newer commit is already on main; skipping this older build."
+          fi
+
       - name: הורדת החבילה המלאה מהרצת הבנייה
+        if: github.event_name == 'workflow_dispatch' || steps.latest_check.outputs.publish == 'true'
         uses: actions/download-artifact@v4
         with:
           name: ספריית-המתכונים-שלי-Windows-כולל-Office
@@ -32,6 +59,7 @@ jobs:
           run-id: ${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id || github.event.workflow_run.id }}
 
       - name: הכנת קובץ בשם נוח לקישור
+        if: github.event_name == 'workflow_dispatch' || steps.latest_check.outputs.publish == 'true'
         shell: bash
         run: |
           source_file="release-assets/ספריית-המתכונים-שלי-Windows-כולל-תצוגת-Office.zip"
@@ -44,6 +72,7 @@ jobs:
           ls -lh recipe-library-windows-office.zip
 
       - name: פרסום או עדכון Release עם קובץ ההורדה
+        if: github.event_name == 'workflow_dispatch' || steps.latest_check.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.4.0
