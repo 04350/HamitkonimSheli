@@ -712,7 +712,7 @@ class RecipeLibrary:
                 if "הספרייה.sqlite3" not in names:
                     raise ValueError("הגיבוי לא מכיל את מסד הנתונים של הספרייה.")
                 for info in archive.infolist():
-                    name = info.filename.replace("\\\\", "/")
+                    name = info.filename.replace("\\", "/")
                     parts = Path(name).parts
                     if name.startswith("/") or ".." in parts or (len(parts) and ":" in parts[0]):
                         raise ValueError("הגיבוי מכיל נתיב קובץ שאינו בטוח.")
@@ -2014,23 +2014,50 @@ class App:
             messagebox.showerror("שגיאה", f"לא ניתן לקרוא את הפריטים שנגררו.\n{exc}")
 
     def import_paths(self, paths):
+        paths = [Path(path) for path in paths]
+        if not paths:
+            return
         added, skipped, failed = 0, 0, 0
         home = self.library.home.resolve()
-        for path in paths:
+        progress_window = tk.Toplevel(self.root)
+        progress_window.title("ייבוא קבצים")
+        progress_window.geometry("460x150")
+        progress_window.transient(self.root)
+        progress_window.grab_set()
+        frame = ttk.Frame(progress_window, padding=18, style="App.TFrame")
+        frame.pack(fill="both", expand=True)
+        progress_text = tk.StringVar(value=f"מכין לייבוא {len(paths)} קבצים…")
+        ttk.Label(frame, textvariable=progress_text, style="Panel.TLabel", anchor="e").pack(fill="x", pady=(0, 10))
+        progress = ttk.Progressbar(frame, mode="determinate", maximum=len(paths), value=0)
+        progress.pack(fill="x")
+        progress_window.update_idletasks()
+        try:
+            for index, path in enumerate(paths, 1):
+                progress_text.set(f"קובץ {index} מתוך {len(paths)}: {path.name[:55]}")
+                progress.configure(value=index - 1)
+                progress_window.update_idletasks()
+                try:
+                    path = path.resolve()
+                    if home == path or home in path.parents:
+                        skipped += 1
+                    else:
+                        ok, _message = self.library.import_one(path)
+                        if ok:
+                            added += 1
+                        else:
+                            skipped += 1
+                except Exception:
+                    failed += 1
+                progress.configure(value=index)
+                progress_window.update_idletasks()
+        finally:
             try:
-                path = path.resolve()
-                if home == path or home in path.parents:
-                    skipped += 1
-                    continue
-                ok, _message = self.library.import_one(path)
-                if ok:
-                    added += 1
-                else:
-                    skipped += 1
-            except Exception:
-                failed += 1
+                progress_window.grab_release()
+                progress_window.destroy()
+            except tk.TclError:
+                pass
         self.refresh()
-        self.status_value.set(f"הייבוא הסתיים: {added} קבצים נוספו, {skipped} דולגו, {failed} נכשלו.")
+        self.status_value.set(f"הייבוא הסתיים: {added} נוספו, {skipped} דולגו, {failed} נכשלו.")
         if failed:
             messagebox.showwarning("סיום ייבוא", f"נוספו {added} קבצים.\nדולגו {skipped} קבצים.\n{failed} קבצים לא נקלטו.")
 
@@ -2287,16 +2314,15 @@ class App:
 
     def backup(self):
         default_name = "גיבוי-הספרייה-" + datetime.now().strftime("%Y%m%d-%H%M") + ".zip"
-        target = filedialog.asksaveasfilename(title="שמירת גיבוי", defaultextension=".zip", initialfile=default_name, filetypes=[("קובץ גיבוי דחוס", "*.zip")])
+        target = filedialog.asksaveasfilename(
+            title="שמירת גיבוי", defaultextension=".zip",
+            initialfile=default_name,
+            filetypes=[("קובץ גיבוי דחוס", "*.zip")]
+        )
         if not target:
             return
         try:
-            self.library.db.commit()
-            with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
-                archive.write(self.library.db_path, "הספרייה.sqlite3")
-                for path in self.library.files_dir.iterdir():
-                    if path.is_file():
-                        archive.write(path, "הקבצים שלי/" + path.name)
+            self.library.create_backup(Path(target))
             self.status_value.set("הגיבוי נוצר בהצלחה.")
             messagebox.showinfo("גיבוי הושלם", "הגיבוי נשמר בהצלחה.")
         except Exception as exc:
@@ -2305,17 +2331,73 @@ class App:
     def settings(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("הגדרות")
-        dialog.geometry("480x250")
+        dialog.geometry("620x570")
+        dialog.minsize(540, 480)
         dialog.transient(self.root)
         dialog.grab_set()
-        frame = ttk.Frame(dialog, padding=18)
+        frame = ttk.Frame(dialog, padding=18, style="App.TFrame")
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="הגדרות הספרייה", font=("Arial", 16, "bold"), anchor="e").pack(fill="x", pady=(0, 12))
-        ttk.Label(frame, text="מיקום שמירת הנתונים במחשב:", anchor="e").pack(fill="x")
-        ttk.Label(frame, text=str(self.library.home), wraplength=430, justify="right").pack(fill="x", pady=5)
-        ttk.Label(frame, text="הנתונים נשמרים במחשב בלבד. התוכנה אינה מתחברת לאינטרנט ואינה שולחת מידע.", wraplength=430, justify="right").pack(fill="x", pady=8)
-        ttk.Button(frame, text="פתיחת תיקיית הנתונים", command=self.open_data_folder).pack(anchor="e", pady=5)
-        ttk.Button(frame, text="סגירה", command=dialog.destroy).pack(anchor="e")
+        ttk.Label(frame, text="הגדרות הספרייה", style="Section.TLabel").pack(fill="x", pady=(0, 12))
+
+        theme_var = tk.StringVar(value=self.library.get_setting("color_theme", "כחול"))
+        font_var = tk.StringVar(value=self.library.get_setting("font_size", "10"))
+        zoom_var = tk.StringVar(value=self.library.get_setting("preview_zoom", "1.0"))
+        auto_var = tk.BooleanVar(value=self.library.get_setting("auto_backup_enabled", "1") == "1")
+        days_var = tk.StringVar(value=self.library.get_setting("auto_backup_days", "7"))
+
+        def option_row(title, variable, values, width=18):
+            row = ttk.Frame(frame, style="App.TFrame")
+            row.pack(fill="x", pady=5)
+            ttk.Label(row, text=title, style="Panel.TLabel").pack(side="right", padx=(0, 10))
+            ttk.Combobox(
+                row, textvariable=variable, values=values,
+                state="readonly", width=width, justify="right"
+            ).pack(side="right")
+            return row
+
+        option_row("ערכת צבעים:", theme_var, ["כחול", "ירוק", "סגול"])
+        option_row("גודל גופן:", font_var, ["9", "10", "11", "12", "13", "14"])
+        option_row("גודל תצוגה מקדימה:", zoom_var, ["0.75", "1.0", "1.25", "1.5"])
+        ttk.Checkbutton(
+            frame, text="הפעלת גיבוי אוטומטי",
+            variable=auto_var
+        ).pack(anchor="e", pady=(12, 4))
+        option_row("מרווח בין גיבויים אוטומטיים:", days_var, ["1", "3", "7", "14", "30"], width=10)
+        ttk.Label(
+            frame, text="הגיבויים האוטומטיים נשמרים בתיקיית ״גיבויים״ ונשמרים חמשת האחרונים.",
+            style="Muted.TLabel", wraplength=560, justify="right"
+        ).pack(fill="x", pady=(4, 10))
+        ttk.Label(frame, text="מיקום שמירת הנתונים במחשב:", style="Panel.TLabel").pack(fill="x", anchor="e")
+        ttk.Label(
+            frame, text=str(self.library.home), style="Muted.TLabel",
+            wraplength=560, justify="right"
+        ).pack(fill="x", pady=5)
+
+        def save_settings():
+            try:
+                days = int(days_var.get())
+                font = int(font_var.get())
+                zoom = float(zoom_var.get())
+                if days < 1 or font < 8 or font > 15 or zoom < 0.5 or zoom > 1.5:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("הגדרות", "אחד הערכים אינו תקין.", parent=dialog)
+                return
+            self.library.set_setting("color_theme", theme_var.get())
+            self.library.set_setting("font_size", str(font))
+            self.library.set_setting("preview_zoom", str(zoom))
+            self.library.set_setting("auto_backup_enabled", "1" if auto_var.get() else "0")
+            self.library.set_setting("auto_backup_days", str(days))
+            self._apply_styles()
+            self._set_preview_placeholder("בחרו תמונה או קובץ מהרשימה") if not self.preview_path else self._render_selected_preview()
+            self.status_value.set("ההגדרות נשמרו.")
+            dialog.destroy()
+
+        buttons = ttk.Frame(frame, style="App.TFrame")
+        buttons.pack(fill="x", pady=(14, 0))
+        ttk.Button(buttons, text="פתיחת תיקיית הנתונים", command=self.open_data_folder).pack(side="right")
+        ttk.Button(buttons, text="שמירה והחלה", style="Primary.TButton", command=save_settings).pack(side="right", padx=8)
+        ttk.Button(buttons, text="סגירה", command=dialog.destroy).pack(side="left")
 
     def close(self):
         try:
