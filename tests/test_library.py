@@ -467,6 +467,7 @@ class בדיקותספרייה(unittest.TestCase):
                 self.assertTrue(stored.is_file())
                 data = library.get_recipe_data(row["id"])
                 self.assertEqual(data["source_folder"], "קינוחים/עוגות")
+                self.assertEqual(data["category"], "קינוחים/עוגות")
                 self.assertIn("קינוחים", library.all_source_folders())
                 self.assertIn("קינוחים/עוגות", library.all_source_folders())
                 self.assertTrue(data["is_recipe"])
