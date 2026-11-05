@@ -25,7 +25,7 @@ from html.parser import HTMLParser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
-from recipe_center import RecipeCenter, recipe_search_text, compile_shopping_list, build_recipe_book_docx, export_recipe_book_pdf
+from recipe_center import RecipeCenter, recipe_search_text, compile_shopping_list, build_recipe_book_docx, export_recipe_book_pdf, parse_recipe_text, is_recipe_record, recipe_missing_parts
 
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -630,13 +630,38 @@ class RecipeLibrary:
             return {}
 
     def set_recipe_data(self, item_id: int, data: dict):
-        allowed = {"category", "ingredients", "instructions", "prep_minutes", "cook_minutes", "servings", "notes"}
-        clean = {key: data.get(key, "") for key in allowed}
+        allowed = {
+            "category", "ingredients", "instructions", "prep_minutes", "cook_minutes",
+            "servings", "notes", "source_folder", "rating", "is_recipe",
+            "history", "versions", "image_path"
+        }
+        existing = self.get_recipe_data(item_id)
+        clean = {}
+        for key in allowed:
+            if key in data:
+                clean[key] = data[key]
+            elif key in existing:
+                clean[key] = existing[key]
+            else:
+                clean[key] = [] if key in ("history", "versions") else ""
         self.db.execute(
             "UPDATE items SET recipe_data=? WHERE id=?",
             (json.dumps(clean, ensure_ascii=False), int(item_id))
         )
         self.db.commit()
+
+    def all_source_folders(self) -> list[str]:
+        folders = set()
+        for row in self.db.execute("SELECT recipe_data FROM items WHERE is_deleted=0"):
+            try:
+                folder = str(json.loads(row["recipe_data"] or "{}").get("source_folder") or "").strip("/")
+            except (ValueError, AttributeError, TypeError):
+                folder = ""
+            if folder:
+                parts = folder.split("/")
+                for index in range(1, len(parts) + 1):
+                    folders.add("/".join(parts[:index]))
+        return sorted(folders, key=lambda value: (value.count("/"), value.casefold()))
 
     def tag_names(self, item_id: int) -> list[str]:
         rows = self.db.execute("""
@@ -870,7 +895,7 @@ class RecipeLibrary:
         """, (int(item_id),)).fetchall()
         return [row["name"] for row in rows]
 
-    def import_one(self, source: Path) -> tuple[bool, str]:
+    def import_one(self, source: Path, relative_folder: str = "") -> tuple[bool, str]:
         if not source.is_file():
             return False, "זה אינו קובץ."
         if source.stat().st_size > MAX_FILE_SIZE:
@@ -880,12 +905,37 @@ class RecipeLibrary:
             return False, "הקובץ כבר נמצא בספרייה."
         content = extract_text(source)
         title = choose_title(source, content)
-        target = unique_path(self.files_dir, title, source.suffix.lower())
+        safe_parts = []
+        for part in Path(str(relative_folder or "")).parts:
+            if part in ("", ".", "..", "/", "\\"):
+                continue
+            cleaned = safe_title(part)
+            if cleaned and cleaned not in (".", ".."):
+                safe_parts.append(cleaned)
+        target_folder = self.files_dir.joinpath(*safe_parts)
+        target_folder.mkdir(parents=True, exist_ok=True)
+        target = unique_path(target_folder, title, source.suffix.lower())
+        parsed = parse_recipe_text(content)
+        recipe_data = {
+            "category": "",
+            "ingredients": parsed.get("ingredients", ""),
+            "instructions": parsed.get("instructions", ""),
+            "prep_minutes": "",
+            "cook_minutes": "",
+            "servings": "",
+            "notes": "",
+            "source_folder": "/".join(safe_parts),
+            "rating": "",
+            "is_recipe": bool(parsed.get("is_recipe")),
+            "history": [],
+            "versions": [],
+        }
         shutil.copy2(source, target)
         try:
             self.db.execute(
-                "INSERT INTO items(title,original_name,stored_path,extension,content,digest,imported_at) VALUES(?,?,?,?,?,?,?)",
-                (title, source.name, str(target), source.suffix.lower(), content, digest, datetime.now().strftime("%d/%m/%Y %H:%M"))
+                "INSERT INTO items(title,original_name,stored_path,extension,content,digest,imported_at,recipe_data) VALUES(?,?,?,?,?,?,?,?)",
+                (title, source.name, str(target), source.suffix.lower(), content, digest,
+                 datetime.now().strftime("%d/%m/%Y %H:%M"), json.dumps(recipe_data, ensure_ascii=False))
             )
             self.db.commit()
         except Exception:
@@ -939,6 +989,8 @@ class App:
         self.gallery_photos = []
         self.date_from_value = tk.StringVar()
         self.date_to_value = tk.StringVar()
+        self.folder_filter_value = tk.StringVar(value="כל התיקיות")
+        self.recipe_filter_value = tk.StringVar(value="כל הפריטים")
         self._filter_options = {}
         self.favorite_button = None
         self.preview_temp_directory = None
