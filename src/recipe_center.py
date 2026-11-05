@@ -8,19 +8,21 @@ import re
 import shutil
 import tempfile
 import webbrowser
+import time
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 try:
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.shared import Inches, Pt
+    from docx.shared import Inches, Pt, RGBColor
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
 except Exception:
     Document = None
-    WD_ALIGN_PARAGRAPH = Inches = Pt = OxmlElement = qn = None
+    WD_ALIGN_PARAGRAPH = Inches = Pt = RGBColor = OxmlElement = qn = None
 
 
 def recipe_search_text(title: str, content: str, recipe: dict | None = None, tags=()) -> str:
@@ -29,10 +31,79 @@ def recipe_search_text(title: str, content: str, recipe: dict | None = None, tag
     values = [
         title, content, recipe.get("category", ""),
         recipe.get("ingredients", ""), recipe.get("instructions", ""),
-        recipe.get("notes", ""), " ".join(str(tag) for tag in tags)
+        recipe.get("notes", ""), recipe.get("source_folder", ""),
+        recipe.get("rating", ""), " ".join(str(tag) for tag in tags)
     ]
     return " ".join(str(value or "") for value in values)
 
+
+
+
+def parse_recipe_text(text: str) -> dict:
+    """חילוץ שמרני של שם, מצרכים והוראות מתוך טקסט בעברית."""
+    lines = [re.sub(r"\s+", " ", line).strip(" \t•▪●") for line in str(text or "").splitlines()]
+    lines = [line for line in lines if line]
+    ingredient_header = re.compile(r"^(?:מצרכים|רכיבים|החומרים|רשימת מצרכים)\s*[:：]?$", re.I)
+    instruction_header = re.compile(r"^(?:אופן ההכנה|הוראות הכנה|שלבי הכנה|הכנה|אופן הכנת)\s*[:：]?$", re.I)
+    other_header = re.compile(r"^(?:הערות|לקישוט|לציפוי|למילוי|רוטב|הגשה|טיפים)\s*[:：]?$", re.I)
+    title = ""
+    for line in lines[:12]:
+        if ingredient_header.match(line) or instruction_header.match(line):
+            continue
+        if len(line) <= 120 and len(line.split()) <= 16 and not re.fullmatch(r"[\d\W_]+", line):
+            title = line
+            break
+    ingredients, instructions = [], []
+    section, found_header = "", False
+    for line in lines:
+        if ingredient_header.match(line):
+            section, found_header = "ingredients", True
+            continue
+        if instruction_header.match(line):
+            section, found_header = "instructions", True
+            continue
+        if other_header.match(line):
+            section = ""
+            continue
+        if line.endswith(":") and len(line) < 45 and not re.search(r"\d", line):
+            if section == "ingredients":
+                section = ""
+            continue
+        if section == "ingredients":
+            ingredients.append(line)
+        elif section == "instructions":
+            instructions.append(line)
+    if not ingredients:
+        units = ("גרם", "קילו", 'ק"ג', 'מ"ל', "ליטר", "כוס", "כפות", "כף", "כפית", "ביצים", "ביצה", "חבילה", "שקית")
+        for line in lines:
+            if re.match(r"^(?:\d+(?:[.,]\d+)?(?:\s*/\s*\d+)?|[½¼¾⅓⅔⅛⅜⅝⅞])\s*", line) or any(unit in line for unit in units):
+                ingredients.append(line)
+    return {
+        "title": title,
+        "ingredients": "\n".join(ingredients[:100]),
+        "instructions": "\n".join(instructions[:160]),
+        "is_recipe": bool(found_header or ingredients or instructions),
+    }
+
+
+def is_recipe_record(recipe: dict, content: str = "") -> bool:
+    """קובע אם פריט הוא מתכון, בלי להתייחס לכל מסמך כאל מתכון."""
+    recipe = recipe if isinstance(recipe, dict) else {}
+    if "is_recipe" in recipe:
+        return bool(recipe.get("is_recipe"))
+    if any(str(recipe.get(key) or "").strip() for key in ("ingredients", "instructions", "category")):
+        return True
+    return bool(parse_recipe_text(content)["is_recipe"])
+
+
+def recipe_missing_parts(recipe: dict) -> list[str]:
+    recipe = recipe if isinstance(recipe, dict) else {}
+    missing = []
+    if not str(recipe.get("ingredients") or "").strip():
+        missing.append("מצרכים")
+    if not str(recipe.get("instructions") or "").strip():
+        missing.append("הוראות הכנה")
+    return missing
 
 def compile_shopping_list(recipes) -> str:
     """מאחד שורות מצרכים זהות בלבד, בלי לחבר כמויות או יחידות שונות."""
@@ -51,24 +122,38 @@ def compile_shopping_list(recipes) -> str:
     return "\n".join(lines)
 
 
-def build_recipe_book_docx(recipes, title: str, target: Path, include_notes: bool = True):
-    """יוצר מסמך Word בעברית ובכיווניות ימין-לשמאל, עמוד נפרד לכל מתכון."""
+def build_recipe_book_docx(
+    recipes, title: str, target: Path, include_notes: bool = True,
+    template: str = "קלאסי", layout: str = "עמוד לכל מתכון",
+    include_toc: bool = True, include_images: bool = True,
+    include_page_numbers: bool = True,
+):
+    """יוצר חוברת Word בעברית, עם עיצובים, תמונות, תוכן עניינים ומספור עמודים."""
     if Document is None or WD_ALIGN_PARAGRAPH is None:
         raise RuntimeError("רכיב יצירת מסמכי Word אינו זמין.")
     recipes = list(recipes or [])
     if not recipes:
         raise ValueError("לא נבחרו מתכונים להדפסה.")
-
     document = Document()
     section = document.sections[0]
-    section.top_margin = Inches(0.65)
-    section.bottom_margin = Inches(0.65)
-    section.left_margin = Inches(0.75)
-    section.right_margin = Inches(0.75)
-
+    section.top_margin = Inches(0.55 if layout != "עמוד לכל מתכון" else 0.65)
+    section.bottom_margin = Inches(0.6)
+    section.left_margin = Inches(0.68)
+    section.right_margin = Inches(0.68)
+    themes = {
+        "קלאסי": {"title": RGBColor(31, 54, 78), "accent": RGBColor(31, 54, 78), "scale": 1.0},
+        "אלגנטי": {"title": RGBColor(103, 75, 112), "accent": RGBColor(150, 116, 87), "scale": 1.0},
+        "פשוט": {"title": RGBColor(25, 25, 25), "accent": RGBColor(90, 90, 90), "scale": 0.96},
+    }
+    theme = themes.get(template, themes["קלאסי"])
+    scale = theme["scale"]
+    if layout == "קומפקטי":
+        scale *= 0.86
+    elif layout == "כרטיסים קטנים (2 בעמוד)":
+        scale *= 0.72
     normal_style = document.styles["Normal"]
     normal_style.font.name = "Arial"
-    normal_style.font.size = Pt(11)
+    normal_style.font.size = Pt(11 * scale)
     normal_rpr = normal_style._element.get_or_add_rPr()
     normal_fonts = normal_rpr.rFonts
     if normal_fonts is None:
@@ -77,10 +162,10 @@ def build_recipe_book_docx(recipes, title: str, target: Path, include_notes: boo
     for key in ("ascii", "hAnsi", "eastAsia", "cs"):
         normal_fonts.set(qn(f"w:{key}"), "Arial")
 
-    def add_line(text, size=11, bold=False, align=None, space_after=5):
+    def add_line(text, size=11, bold=False, align=None, space_after=5, color=None):
         paragraph = document.add_paragraph()
         paragraph.alignment = align if align is not None else WD_ALIGN_PARAGRAPH.RIGHT
-        paragraph.paragraph_format.space_after = Pt(space_after)
+        paragraph.paragraph_format.space_after = Pt(max(1, space_after * scale))
         paragraph.paragraph_format.keep_together = True
         ppr = paragraph._p.get_or_add_pPr()
         bidi = OxmlElement("w:bidi")
@@ -88,8 +173,10 @@ def build_recipe_book_docx(recipes, title: str, target: Path, include_notes: boo
         ppr.append(bidi)
         run = paragraph.add_run(str(text or ""))
         run.font.name = "Arial"
-        run.font.size = Pt(size)
+        run.font.size = Pt(max(7, size * scale))
         run.bold = bold
+        if color is not None:
+            run.font.color.rgb = color
         rpr = run._r.get_or_add_rPr()
         rtl = OxmlElement("w:rtl")
         rtl.set(qn("w:val"), "1")
@@ -102,73 +189,102 @@ def build_recipe_book_docx(recipes, title: str, target: Path, include_notes: boo
             fonts.set(qn(f"w:{key}"), "Arial")
         return paragraph
 
-    add_line(title or "חוברת המתכונים שלי", 25, True, WD_ALIGN_PARAGRAPH.CENTER, 10)
-    add_line(f"חוברת מתכונים · {len(recipes)} פריטים", 11, False, WD_ALIGN_PARAGRAPH.CENTER, 8)
+    if include_page_numbers:
+        footer = section.footer.paragraphs[0]
+        footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = footer.add_run()
+        begin = OxmlElement("w:fldChar")
+        begin.set(qn("w:fldCharType"), "begin")
+        instruction = OxmlElement("w:instrText")
+        instruction.set(qn("xml:space"), "preserve")
+        instruction.text = " PAGE "
+        separate = OxmlElement("w:fldChar")
+        separate.set(qn("w:fldCharType"), "separate")
+        number = OxmlElement("w:t")
+        number.text = "1"
+        end = OxmlElement("w:fldChar")
+        end.set(qn("w:fldCharType"), "end")
+        run._r.extend([begin, instruction, separate, number, end])
+
+    add_line(title or "חוברת המתכונים שלי", 26, True, WD_ALIGN_PARAGRAPH.CENTER, 10, theme["title"])
+    add_line(f"חוברת מתכונים · {len(recipes)} פריטים", 11, False, WD_ALIGN_PARAGRAPH.CENTER, 8, theme["accent"])
     add_line("נוצרה מתוך ספריית המתכונים שלי", 9, False, WD_ALIGN_PARAGRAPH.CENTER, 0)
     document.add_page_break()
+    if include_toc:
+        add_line("תוכן החוברת", 20, True, space_after=12, color=theme["title"])
+        for index, recipe in enumerate(recipes, 1):
+            add_line(f"{index}. {recipe.get('title') or f'מתכון {index}'}", 11, False, space_after=4)
+        document.add_page_break()
 
     for index, recipe in enumerate(recipes):
-        if index:
+        if index and layout == "עמוד לכל מתכון":
             document.add_page_break()
-        add_line(recipe.get("title") or f"מתכון {index + 1}", 21, True, space_after=8)
+        elif index and layout == "כרטיסים קטנים (2 בעמוד)" and index % 2 == 0:
+            document.add_page_break()
+        add_line(recipe.get("title") or f"מתכון {index + 1}", 21, True, space_after=7, color=theme["title"])
         metadata = []
         for key, label, suffix in (
             ("category", "קטגוריה", ""),
             ("prep_minutes", "זמן הכנה", " דקות"),
             ("cook_minutes", "זמן בישול", " דקות"),
             ("servings", "כמות", " מנות"),
+            ("rating", "דירוג", " ★"),
         ):
             value = str(recipe.get(key) or "").strip()
-            if value:
+            if value and value not in ("0", "ללא דירוג"):
                 metadata.append(f"{label}: {value}{suffix}")
         if metadata:
-            add_line("  |  ".join(metadata), 9, False, space_after=12)
-
+            add_line("  |  ".join(metadata), 9, False, space_after=8, color=theme["accent"])
+        image_path = str(recipe.get("image_path") or "").strip()
+        if include_images and image_path and Path(image_path).is_file():
+            try:
+                document.add_picture(image_path, width=Inches(3.3 if layout != "כרטיסים קטנים (2 בעמוד)" else 2.2))
+                document.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            except Exception:
+                pass
         ingredients = str(recipe.get("ingredients") or "").strip()
         instructions = str(recipe.get("instructions") or "").strip()
         notes = str(recipe.get("notes") or "").strip()
         source = str(recipe.get("content") or "").strip()
-
         if ingredients:
-            add_line("מצרכים", 14, True, space_after=5)
+            add_line("מצרכים", 14, True, space_after=4, color=theme["accent"])
             for line in ingredients.splitlines():
                 if line.strip():
-                    add_line("• " + line.strip(), 11, False, space_after=2)
+                    add_line("• " + line.strip(), 10 if layout == "כרטיסים קטנים (2 בעמוד)" else 11, False, space_after=2)
         if instructions:
-            add_line("הוראות הכנה", 14, True, space_after=5)
+            add_line("הוראות הכנה", 14, True, space_after=4, color=theme["accent"])
             for line in instructions.splitlines():
                 if line.strip():
-                    add_line(line.strip(), 11, False, space_after=4)
+                    add_line(line.strip(), 10 if layout == "כרטיסים קטנים (2 בעמוד)" else 11, False, space_after=3)
         if include_notes and notes:
-            add_line("הערות אישיות", 14, True, space_after=5)
+            add_line("הערות אישיות", 13, True, space_after=4, color=theme["accent"])
             for line in notes.splitlines():
                 if line.strip():
-                    add_line(line.strip(), 10, False, space_after=3)
+                    add_line(line.strip(), 9, False, space_after=2)
         if source:
             known_lines = {
                 re.sub(r"\s+", " ", line.strip()).casefold()
                 for block in (ingredients, instructions)
-                for line in block.splitlines()
-                if line.strip()
+                for line in block.splitlines() if line.strip()
             }
             remaining_lines = [
                 line.strip() for line in source.splitlines()
                 if line.strip() and re.sub(r"\s+", " ", line.strip()).casefold() not in known_lines
             ]
             if remaining_lines:
-                add_line("טקסט נוסף מהקובץ המקורי", 14, True, space_after=5)
+                add_line("טקסט נוסף מהקובץ המקורי", 12, True, space_after=4, color=theme["accent"])
                 for line in remaining_lines:
-                    add_line(line, 10, False, space_after=3)
+                    add_line(line, 9, False, space_after=2)
         elif not ingredients and not instructions and not notes:
             add_line("לא הוזנו פרטי מתכון לפריט זה.", 10)
-
+        if layout == "כרטיסים קטנים (2 בעמוד)" and index % 2 == 0 and index + 1 < len(recipes):
+            add_line("─" * 48, 8, False, WD_ALIGN_PARAGRAPH.CENTER, 5, theme["accent"])
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     document.save(str(target))
     return target
 
-
-def export_recipe_book_pdf(recipes, title: str, target: Path, converter, include_notes: bool = True) -> Path:
+def export_recipe_book_pdf(recipes, title: str, target: Path, converter, include_notes: bool = True, template: str = 'קלאסי', layout: str = 'עמוד לכל מתכון', include_toc: bool = True, include_images: bool = True, include_page_numbers: bool = True) -> Path:
     """ממיר חוברת Word ל-PDF בעזרת מנוע LibreOffice שכבר כלול בחבילת Windows."""
     target = Path(target)
     if target.suffix.lower() != ".pdf":
@@ -177,7 +293,7 @@ def export_recipe_book_pdf(recipes, title: str, target: Path, converter, include
     conversion_directory = None
     try:
         docx_path = temporary_root / "recipe-book.docx"
-        build_recipe_book_docx(recipes, title, docx_path, include_notes)
+        build_recipe_book_docx(recipes, title, docx_path, include_notes, template, layout, include_toc, include_images, include_page_numbers)
         pdf_path, conversion_directory, error = converter(docx_path, timeout=240)
         if pdf_path is None:
             raise RuntimeError(error or "לא ניתן ליצור קובץ PDF.")
