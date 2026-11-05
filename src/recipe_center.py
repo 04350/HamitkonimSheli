@@ -40,8 +40,6 @@ def compile_shopping_list(recipes) -> str:
     seen = set()
     for recipe in recipes or []:
         ingredients = str(recipe.get("ingredients") or "").strip()
-        if not ingredients:
-            ingredients = str(recipe.get("content") or "")
         for raw in ingredients.splitlines():
             line = raw.strip().lstrip("•▪●*- ").strip()
             if not line or len(line) > 220:
