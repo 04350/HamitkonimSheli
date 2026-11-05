@@ -2218,23 +2218,31 @@ class App:
     def add_folder(self):
         folder = filedialog.askdirectory(title="בחירת תיקייה לייבוא")
         if folder:
-            paths = [p for p in Path(folder).rglob("*") if p.is_file()]
-            self.import_paths(paths)
+            root_folder = Path(folder)
+            paths = [p for p in root_folder.rglob("*") if p.is_file()]
+            self.import_paths(paths, source_root=root_folder)
 
     def on_drop(self, event):
         try:
             paths = [Path(p) for p in self.root.tk.splitlist(event.data)]
-            expanded = []
+            expanded, roots = [], []
             for path in paths:
                 if path.is_dir():
+                    roots.append(path.resolve())
                     expanded.extend(p for p in path.rglob("*") if p.is_file())
                 elif path.is_file():
                     expanded.append(path)
-            self.import_paths(expanded)
+            source_root = None
+            if roots:
+                try:
+                    source_root = Path(os.path.commonpath([str(root) for root in roots]))
+                except ValueError:
+                    source_root = roots[0] if len(roots) == 1 else None
+            self.import_paths(expanded, source_root=source_root)
         except Exception as exc:
             messagebox.showerror("שגיאה", f"לא ניתן לקרוא את הפריטים שנגררו.\n{exc}")
 
-    def import_paths(self, paths):
+    def import_paths(self, paths, source_root: Path | None = None):
         paths = [Path(path) for path in paths]
         if not paths:
             return
@@ -2263,7 +2271,13 @@ class App:
                     if home == path or home in path.parents:
                         skipped += 1
                     else:
-                        ok, _message = self.library.import_one(path)
+                        relative_folder = ""
+                        if source_root is not None:
+                            try:
+                                relative_folder = path.parent.relative_to(Path(source_root).resolve()).as_posix()
+                            except (ValueError, OSError):
+                                relative_folder = ""
+                        ok, _message = self.library.import_one(path, relative_folder=relative_folder)
                         if ok:
                             added += 1
                         else:
