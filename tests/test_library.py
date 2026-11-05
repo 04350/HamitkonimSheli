@@ -538,5 +538,30 @@ class בדיקותספרייה(unittest.TestCase):
             self.assertIn("עוגת גבינה", text)
             self.assertIn("PAGE", document.sections[0].footer._element.xml)
 
+
+    def test_שינוי_שם_שומר_את_תיקיית_המקור(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = temp
+                source = Path(temp) / "מקור" / "קינוחים" / "עוגות" / "עוגה.txt"
+                source.parent.mkdir(parents=True)
+                source.write_text("עוגה\nמצרכים:\nקמח\nאופן ההכנה:\nמערבבים", encoding="utf-8")
+                library = app.RecipeLibrary()
+                self.assertTrue(library.import_one(source, relative_folder="קינוחים/עוגות")[0])
+                row = library.rows()[0]
+                library.rename(int(row["id"]), "עוגה חדשה")
+                renamed = library.rows()[0]
+                self.assertEqual(Path(renamed["stored_path"]).parent, library.files_dir / "קינוחים" / "עוגות")
+                self.assertEqual(Path(renamed["stored_path"]).name, "עוגה חדשה.txt")
+                self.assertTrue(Path(renamed["stored_path"]).is_file())
+                self.assertEqual(library.get_recipe_data(row["id"])["source_folder"], "קינוחים/עוגות")
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
 if __name__ == "__main__":
     unittest.main()
