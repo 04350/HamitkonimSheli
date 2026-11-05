@@ -27,9 +27,9 @@ jobs:
         with:
           name: ספריית-המתכונים-שלי-Windows-כולל-Office
           path: release-assets
-          github-token: \${{ secrets.GITHUB_TOKEN }}
-          repository: \${{ github.repository }}
-          run-id: \${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id || github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id || github.event.workflow_run.id }}
 
       - name: הכנת קובץ בשם נוח לקישור
         shell: bash
