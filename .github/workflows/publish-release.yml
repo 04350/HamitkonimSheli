@@ -6,8 +6,12 @@ on:
       source_run_id:
         description: מזהה הרצת הבנייה שממנה מורידים את החבילה
         required: true
-        default: "41709644931"
+        default: "42034577443"
         type: string
+  workflow_run:
+    workflows: ["בניית התוכנה למחשב"]
+    types: [completed]
+    branches: [main]
 
 permissions:
   actions: read
@@ -15,6 +19,7 @@ permissions:
 
 jobs:
   publish:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: הורדת החבילה המלאה מהרצת הבנייה
@@ -22,9 +27,9 @@ jobs:
         with:
           name: ספריית-המתכונים-שלי-Windows-כולל-Office
           path: release-assets
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.source_run_id }}
+          github-token: \${{ secrets.GITHUB_TOKEN }}
+          repository: \${{ github.repository }}
+          run-id: \${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id || github.event.workflow_run.id }}
 
       - name: הכנת קובץ בשם נוח לקישור
         shell: bash
@@ -41,14 +46,19 @@ jobs:
       - name: פרסום או עדכון Release עם קובץ ההורדה
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1.0
-          name: ספריית המתכונים שלי – Windows v1.1.0
+          tag_name: v1.2.0
+          name: ספריית המתכונים שלי – Windows v1.2.0
           target_commitish: main
           body: |
-            חבילת Windows המלאה של ספריית המתכונים שלי.
+            גרסה 1.2.0 של ספריית המתכונים שלי.
 
-            **הורדה:** קובץ ZIP נייד הכולל את התוכנה ואת מנוע התצוגה למסמכי Office.
-            לאחר החילוץ יש להשאיר את קובץ ההפעלה ואת תיקיית LibreOffice יחד.
+            - ממשק משתמש מעוצב ומחודש בעברית.
+            - אזור תצוגה מקדימה גדול יותר לתמונות.
+            - חלוקה נוחה יותר בין רשימת הקבצים לתצוגה המקדימה.
+            - הגדלת חלון הצפייה בתמונות ובמסמכים.
+            - החבילה כוללת את מנוע התצוגה למסמכי Office.
+            
+            לאחר חילוץ ה-ZIP יש להשאיר את קובץ ההפעלה ואת תיקיית LibreOffice יחד.
           files: recipe-library-windows-office.zip
           overwrite_files: true
           fail_on_unmatched_files: true
