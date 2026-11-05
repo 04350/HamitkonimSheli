@@ -259,5 +259,118 @@ class בדיקותספרייה(unittest.TestCase):
             else:
                 os.environ["LOCALAPPDATA"] = previous
 
+
+    def test_זיהוי_מצרכים_וחישוב_כמויות(self):
+        source = "מצרכים:\n2 כוסות קמח\n1/2 כוס סוכר\n3 ביצים\nאופן ההכנה:\nמערבבים היטב"
+        extracted = app.extract_ingredients(source)
+        self.assertIn("2 כוסות קמח", extracted)
+        self.assertIn("1/2 כוס סוכר", extracted)
+        self.assertNotIn("מערבבים היטב", extracted)
+        scaled = app.scale_ingredient_amounts(extracted, 4, 8)
+        self.assertIn("4 כוסות קמח", scaled)
+        self.assertIn("1 כוס סוכר", scaled)
+        self.assertIn("6 ביצים", scaled)
+
+    def test_נתוני_מתכון_תגיות_וחיפוש_קטגוריות(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = temp
+                source = Path(temp) / "עוגה.txt"
+                source.write_text("עוגה מיוחדת\n2 כוסות קמח", encoding="utf-8")
+                library = app.RecipeLibrary()
+                added, _ = library.import_one(source)
+                self.assertTrue(added)
+                item_id = library.rows()[0]["id"]
+                library.set_recipe_data(item_id, {
+                    "category": "קינוחים",
+                    "ingredients": "2 כוסות קמח",
+                    "instructions": "מערבבים ואופים",
+                    "prep_minutes": "15",
+                    "cook_minutes": "30",
+                    "servings": "4",
+                    "notes": "לשמור בקירור"
+                })
+                library.set_item_tags(item_id, ["קל", "מהיר", "קל"])
+                self.assertEqual(library.get_recipe_data(item_id)["servings"], "4")
+                self.assertEqual(library.tag_names(item_id), ["מהיר", "קל"])
+                self.assertIn("קינוחים", library.all_categories())
+                self.assertIn("מהיר", library.all_tags())
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_סל_מחזור_משחזר_קובץ_בלי_לאבד_מטאדאטה(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = temp
+                source = Path(temp) / "מסמך.txt"
+                source.write_text("מסמך בדיקה", encoding="utf-8")
+                library = app.RecipeLibrary()
+                added, _ = library.import_one(source)
+                self.assertTrue(added)
+                row = library.rows()[0]
+                item_id = int(row["id"])
+                stored = Path(row["stored_path"])
+                library.set_favorite(item_id, True)
+                library.move_to_recycle_bin(item_id)
+                self.assertEqual(library.rows(), [])
+                self.assertEqual(len(library.recycled_rows()), 1)
+                self.assertTrue(stored.is_file())
+                library.restore_from_recycle_bin(item_id)
+                restored = library.rows()[0]
+                self.assertEqual(restored["is_favorite"], 1)
+                self.assertTrue(Path(restored["stored_path"]).is_file())
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_גיבוי_ושחזור_מחזירים_את_הספרייה_כולה(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                first = Path(temp) / "ראשון.txt"
+                first.write_text("מתכון ראשון", encoding="utf-8")
+                second = Path(temp) / "שני.txt"
+                second.write_text("מתכון שני", encoding="utf-8")
+
+                library = app.RecipeLibrary()
+                self.assertTrue(library.import_one(first)[0])
+                item_id = int(library.rows()[0]["id"])
+                collection_id = library.create_collection("שמורים")
+                library.set_favorite(item_id, True)
+                library.set_item_collection(item_id, collection_id, True)
+                backup = Path(temp) / "גיבוי.zip"
+                library.create_backup(backup)
+
+                self.assertTrue(library.import_one(second)[0])
+                self.assertEqual(len(library.rows()), 2)
+                restored_count = library.restore_backup(backup)
+                self.assertEqual(restored_count, 1)
+                restored = library.rows()
+                self.assertEqual(len(restored), 1)
+                self.assertEqual(restored[0]["is_favorite"], 1)
+                self.assertTrue(Path(restored[0]["stored_path"]).is_file())
+                self.assertEqual(library.item_collection_names(item_id), ["שמורים"])
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_בדיקת_דמיון_תוכן_לזיהוי_כפילויות(self):
+        first = "עוגת תפוחים עם קינמון: קמח, ביצים, תפוחים וסוכר. אופים בתנור."
+        second = "עוגת תפוחים קינמון: מערבבים קמח, ביצים, תפוחים וסוכר ואופים בתנור."
+        self.assertGreater(app.text_similarity(first, second), 0.55)
+
 if __name__ == "__main__":
     unittest.main()
