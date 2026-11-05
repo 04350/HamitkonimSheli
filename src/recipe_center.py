@@ -595,11 +595,107 @@ class RecipeCenter:
 
         ttk.Button(weekly_tab, text="שמירת התכנון השבועי", style="Primary.TButton", command=save_plan).pack(anchor="e", pady=(12, 0))
 
-        # 4. Step-by-step instructions for cooking.
+        # 4. כרטיס מתכון עשיר והיסטוריית הכנה.
+        card_tab = ttk.Frame(notebook, padding=16, style="App.TFrame")
+        notebook.add(card_tab, text="🗂 כרטיס מתכון")
+        ttk.Label(card_tab, text="כרטיס מתכון והיסטוריית הכנה", style="Section.TLabel").pack(fill="x", anchor="e")
+        card_selector = tk.StringVar(value="— בחירת מתכון —")
+        card_combo = ttk.Combobox(card_tab, textvariable=card_selector, values=["— בחירת מתכון —"] + list(display_by_id.values()), state="readonly", width=55, justify="right")
+        card_combo.pack(fill="x", pady=(8, 10))
+        card_frame = ttk.Frame(card_tab, padding=14, style="Card.TFrame")
+        card_frame.pack(fill="both", expand=True)
+        card_title = ttk.Label(card_frame, text="בחרו מתכון להצגת הכרטיס.", style="Section.TLabel")
+        card_title.pack(fill="x", anchor="e")
+        card_image_label = ttk.Label(card_frame, style="Panel.TLabel")
+        card_image_label.pack(anchor="center", pady=4)
+        card_details = tk.Text(card_frame, wrap="word", font=("Segoe UI", 10), height=16, padx=12, pady=10, relief="flat", background="#FFFFFF")
+        card_details.pack(fill="both", expand=True, pady=(5, 8))
+        card_details.tag_configure("rtl", justify="right")
+        self.card_photo = None
+        history_frame = ttk.Frame(card_tab, padding=10, style="Card.TFrame")
+        history_frame.pack(fill="x")
+        ttk.Label(history_frame, text="תיעוד הכנה", style="Panel.TLabel").pack(anchor="e")
+        loved_var = tk.BooleanVar(value=True)
+        change_var = tk.StringVar()
+        ttk.Checkbutton(history_frame, text="אהבתי את התוצאה", variable=loved_var).pack(anchor="e", pady=3)
+        ttk.Entry(history_frame, textvariable=change_var, justify="right").pack(fill="x", pady=3)
+        change_var.set("מה שיניתי בהכנה הפעם?")
+        history_list = tk.Listbox(history_frame, height=4, justify="right", exportselection=False)
+        history_list.pack(fill="x", pady=4)
+
+        def refresh_recipe_card(_event=None):
+            item_id = id_by_display.get(card_selector.get())
+            card_details.configure(state="normal")
+            card_details.delete("1.0", "end")
+            history_list.delete(0, "end")
+            card_image_label.configure(image="", text="")
+            self.card_photo = None
+            if item_id is None:
+                card_title.configure(text="בחרו מתכון להצגת הכרטיס.")
+                card_details.configure(state="disabled")
+                return
+            record = self.by_id[item_id]
+            rating = int(record.get("rating") or 0) if str(record.get("rating") or "").isdigit() else 0
+            card_title.configure(text=f"{record['title']}  ·  {'★' * rating if rating else 'ללא דירוג'}")
+            metadata = [
+                f"זמן הכנה: {record.get('prep_minutes') or 'לא צוין'} דקות",
+                f"זמן בישול: {record.get('cook_minutes') or 'לא צוין'} דקות",
+                f"כמות: {record.get('servings') or 'לא צוין'} מנות",
+                f"תיקייה מקורית: {record.get('source_folder') or 'שורש הספרייה'}",
+                "",
+                "מצרכים:",
+                record.get("ingredients") or "לא הוזנו מצרכים",
+                "",
+                "הוראות הכנה:",
+                record.get("instructions") or "לא הוזנו הוראות",
+                "",
+                "הערות:",
+                record.get("notes") or "אין הערות",
+            ]
+            card_details.insert("1.0", "\n".join(metadata))
+            card_details.tag_add("rtl", "1.0", "end")
+            card_details.configure(state="disabled")
+            image_path = record.get("image_path")
+            if image_path:
+                try:
+                    from PIL import Image, ImageTk
+                    with Image.open(image_path) as image:
+                        image.thumbnail((220, 150))
+                        self.card_photo = ImageTk.PhotoImage(image.copy())
+                    card_image_label.configure(image=self.card_photo)
+                except Exception:
+                    card_image_label.configure(text="לא ניתן להציג את התמונה המצורפת.")
+            recipe_data = app.library.get_recipe_data(item_id)
+            for entry in (recipe_data.get("history") or [])[-8:]:
+                liked = "אהבתי" if entry.get("loved") else "לא אהבתי"
+                history_list.insert("end", f"{entry.get('date','')} · {liked} · {entry.get('changes','')}")
+        card_combo.bind("<<ComboboxSelected>>", refresh_recipe_card)
+
+        def log_cooking():
+            item_id = id_by_display.get(card_selector.get())
+            if item_id is None:
+                messagebox.showinfo("היסטוריית הכנה", "בחרו מתכון.", parent=window)
+                return
+            data = app.library.get_recipe_data(item_id)
+            history = list(data.get("history") or [])
+            changes = change_var.get().strip()
+            history.append({
+                "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                "loved": bool(loved_var.get()),
+                "changes": changes if changes != "מה שיניתי בהכנה הפעם?" else "",
+            })
+            data["history"] = history[-100:]
+            app.library.set_recipe_data(item_id, data)
+            change_var.set("")
+            refresh_recipe_card()
+            messagebox.showinfo("היסטוריית הכנה", "ההכנה נשמרה בהיסטוריה.", parent=window)
+        ttk.Button(history_frame, text="שמירת תיעוד הכנה", style="Primary.TButton", command=log_cooking).pack(anchor="e", pady=(4, 0))
+
+        # 5. מצב בישול מתקדם עם סימון שלבים וטיימרים מקבילים.
         cooking_tab = ttk.Frame(notebook, padding=16, style="App.TFrame")
-        notebook.add(cooking_tab, text="מצב בישול")
+        notebook.add(cooking_tab, text="🍳 מצב בישול")
         ttk.Label(cooking_tab, text="מצב הכנה — שלב אחר שלב", style="Section.TLabel").pack(fill="x", anchor="e")
-        ttk.Label(cooking_tab, text="בחרו מתכון והתקדמו בין שלבי ההכנה.", style="Muted.TLabel").pack(fill="x", anchor="e", pady=(3, 12))
+        ttk.Label(cooking_tab, text="אפשר לסמן שלבים שהושלמו ולהפעיל כמה טיימרים במקביל.", style="Muted.TLabel").pack(fill="x", anchor="e", pady=(3, 12))
         selector = ttk.Frame(cooking_tab, padding=12, style="Card.TFrame")
         selector.pack(fill="x")
         ttk.Label(selector, text="המתכון:", style="Panel.TLabel").pack(side="right", padx=(0, 8))
@@ -610,22 +706,38 @@ class RecipeCenter:
         card.pack(fill="both", expand=True, pady=12)
         count_label = ttk.Label(card, text="בחרו מתכון כדי להתחיל.", style="Muted.TLabel")
         count_label.pack(fill="x", anchor="e", pady=(0, 15))
+        step_done = tk.BooleanVar(value=False)
+        done_check = ttk.Checkbutton(card, text="סיימתי את השלב הזה", variable=step_done)
+        done_check.pack(anchor="e", pady=(0, 8))
         step_label = ttk.Label(card, text="", style="Section.TLabel", justify="right", anchor="ne", wraplength=900)
         step_label.pack(fill="both", expand=True, anchor="ne")
-        steps = []
-        current = [0]
+        steps, done_steps, current = [], set(), [0]
+        font_size = [22]
+        timers = {}
 
         def render_step():
             if not steps:
                 count_label.configure(text="אין שלבי הכנה זמינים.")
                 step_label.configure(text="אפשר להוסיף הוראות בחלון ״תצוגת מתכון מקצועית״.")
+                done_check.configure(state="disabled")
                 return
+            done_check.configure(state="normal")
             count_label.configure(text=f"שלב {current[0] + 1} מתוך {len(steps)}")
-            step_label.configure(text=steps[current[0]])
+            step_done.set(current[0] in done_steps)
+            step_label.configure(text=steps[current[0]], font=("Segoe UI", font_size[0], "bold"))
+
+        def toggle_done():
+            if step_done.get():
+                done_steps.add(current[0])
+            else:
+                done_steps.discard(current[0])
+            render_step()
+        done_check.configure(command=toggle_done)
 
         def load_cooking(_event=None):
             item_id = id_by_display.get(cooking_var.get())
             steps.clear()
+            done_steps.clear()
             current[0] = 0
             if item_id is not None:
                 recipe = self.by_id[item_id]
@@ -636,9 +748,59 @@ class RecipeCenter:
         cooking_combo.bind("<<ComboboxSelected>>", load_cooking)
         navigation = ttk.Frame(cooking_tab, style="App.TFrame")
         navigation.pack(fill="x")
+        ttk.Button(navigation, text="A−", command=lambda: (font_size.__setitem__(0, max(14, font_size[0]-2)), render_step())).pack(side="left", padx=3)
+        ttk.Button(navigation, text="A+", command=lambda: (font_size.__setitem__(0, min(42, font_size[0]+2)), render_step())).pack(side="left", padx=3)
         ttk.Button(navigation, text="השלב הקודם", command=lambda: (current.__setitem__(0, max(0, current[0] - 1)), render_step())).pack(side="right")
         ttk.Button(navigation, text="השלב הבא", style="Primary.TButton", command=lambda: (current.__setitem__(0, min(max(0, len(steps) - 1), current[0] + 1)), render_step())).pack(side="right", padx=8)
+        timer_frame = ttk.Frame(cooking_tab, padding=10, style="Card.TFrame")
+        timer_frame.pack(fill="x")
+        ttk.Label(timer_frame, text="טיימרים פעילים", style="Panel.TLabel").pack(anchor="e")
+        timer_rows = ttk.Frame(timer_frame, style="Card.TFrame")
+        timer_rows.pack(fill="x", pady=(4, 0))
+
+        def tick_timers():
+            now = time.monotonic()
+            finished = []
+            for timer_id, item in list(timers.items()):
+                remaining = max(0, int(item["end"] - now + 0.999))
+                minutes, seconds = divmod(remaining, 60)
+                item["widget"].configure(text=f"{item['label']}  ·  {minutes:02d}:{seconds:02d}")
+                if remaining <= 0:
+                    item["widget"].configure(text=f"⏰ הסתיים: {item['label']}")
+                    finished.append(timer_id)
+                    try:
+                        window.bell()
+                    except tk.TclError:
+                        pass
+            for timer_id in finished:
+                timers.pop(timer_id, None)
+            if timers and window.winfo_exists():
+                window.after(1000, tick_timers)
+
+        def start_timer():
+            if not steps:
+                messagebox.showinfo("טיימר", "בחרו מתכון עם שלבי הכנה.", parent=window)
+                return
+            match = re.search(r"(\d{1,3})\s*(?:דקות|דקה|min)", steps[current[0]], re.I)
+            default_minutes = int(match.group(1)) if match else 5
+            minutes = simpledialog.askinteger("טיימר לשלב", "כמה דקות להפעיל עבור השלב הנוכחי?", parent=window, initialvalue=default_minutes, minvalue=1, maxvalue=600)
+            if not minutes:
+                return
+            timer_id = str(time.time_ns())
+            timers[timer_id] = {"end": time.monotonic() + minutes * 60, "label": steps[current[0]][:70], "widget": None}
+            row = ttk.Frame(timer_rows, style="Card.TFrame")
+            row.pack(fill="x", pady=2)
+            label = ttk.Label(row, text="", style="Panel.TLabel")
+            label.pack(side="right", fill="x", expand=True)
+            ttk.Button(row, text="ביטול", command=lambda tid=timer_id, frame=row: (timers.pop(tid, None), frame.destroy())).pack(side="left")
+            timers[timer_id]["widget"] = label
+            if len(timers) == 1:
+                tick_timers()
+
+        ttk.Button(navigation, text="⏱ טיימר לשלב הנוכחי", command=start_timer).pack(side="left", padx=8)
         if initial_item_id is not None and int(initial_item_id) in display_by_id:
             cooking_var.set(display_by_id[int(initial_item_id)])
             load_cooking()
+            card_selector.set(display_by_id[int(initial_item_id)])
+            refresh_recipe_card()
         return window
