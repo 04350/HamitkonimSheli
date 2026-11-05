@@ -1423,21 +1423,41 @@ class App:
         path = Path(row["stored_path"])
         collection_names = self.library.item_collection_names(row["id"])
         collection_text = ", ".join(collection_names) if collection_names else "ללא אוסף"
+        tag_names = self.library.tag_names(row["id"])
+        category = self.library.get_recipe_data(row["id"]).get("category", "")
         info = (
             f"שם: {row['title']}\n"
             f"קובץ מקורי: {row['original_name']}\n"
             f"נוסף בתאריך: {row['imported_at']}\n"
+            f"קטגוריה: {category or 'ללא קטגוריה'}\n"
+            f"תגיות: {', '.join(tag_names) if tag_names else 'ללא תגיות'}\n"
             f"אוספים: {collection_text}"
         )
         self.detail_label.configure(text=info)
         self._update_selection_actions(row)
+        self._cleanup_preview_temp()
         self.preview_photo = None
-        self.preview_path = path if path.suffix.lower() in IMAGE_TYPES and Image is not None else None
-        if self.preview_path is not None:
-            self._set_preview_placeholder("טוען תצוגה מקדימה…")
-            self.root.after_idle(self._render_selected_image)
-            return
-        self._set_preview_placeholder("אין תצוגה מקדימה לקובץ הזה")
+        self.preview_path = path
+        self.preview_render_path = path
+        self.preview_notice = ""
+        if path.suffix.lower() in OFFICE_TYPES:
+            converted, temp_dir, notice = convert_office_to_pdf(path)
+            if converted is not None:
+                self.preview_render_path = converted
+                self.preview_temp_directory = temp_dir
+            else:
+                self.preview_notice = notice
+        self._set_preview_placeholder("טוען תצוגה מקדימה…")
+        self.root.after_idle(self._render_selected_preview)
+
+    def _put_preview_image(self, photo, width: int, height: int):
+        self.preview_photo = photo
+        self.preview_image.delete("all")
+        self.preview_image.create_image(
+            width // 2, height // 2,
+            image=self.preview_photo, anchor="center",
+            tags=("preview-image",)
+        )
 
     def toggle_favorite(self):
         row = self.selected_row()
@@ -1551,12 +1571,14 @@ class App:
                 self.root.after_cancel(self._preview_resize_job)
             except tk.TclError:
                 pass
-        self._preview_resize_job = self.root.after(140, self._render_selected_image)
+        self._preview_resize_job = self.root.after(160, self._render_selected_preview)
 
-    def _render_selected_image(self):
+    def _render_selected_preview(self):
         self._preview_resize_job = None
-        path = self.preview_path
-        if path is None or not path.is_file() or Image is None or ImageTk is None:
+        path = self.preview_render_path or self.preview_path
+        source_path = self.preview_path
+        if path is None or not path.is_file():
+            self._set_preview_placeholder("הקובץ לא נמצא.")
             return
         try:
             self.preview_image.update_idletasks()
@@ -1564,22 +1586,72 @@ class App:
             height = self.preview_image.winfo_height()
             if width < 80 or height < 80:
                 return
-            target_size = (width - 28, height - 28)
-            with Image.open(path) as source:
-                source.seek(0)
-                image = source.convert("RGBA")
-            resampling = getattr(Image, "Resampling", Image)
-            image.thumbnail(target_size, getattr(resampling, "LANCZOS", 1))
-            self.preview_photo = ImageTk.PhotoImage(image)
-            self.preview_image.delete("all")
-            self.preview_image.create_image(
-                width // 2, height // 2,
-                image=self.preview_photo, anchor="center",
-                tags=("preview-image",)
+            target_width, target_height = max(1, width - 28), max(1, height - 28)
+            suffix = source_path.suffix.lower()
+
+            if suffix in IMAGE_TYPES and Image is not None and ImageTk is not None:
+                with Image.open(source_path) as source:
+                    source.seek(0)
+                    image = source.convert("RGBA")
+                if fitz is not None:
+                    zoom = float(self.library.get_setting("preview_zoom", "1.0") or "1.0")
+                    target_width = max(1, int(target_width * zoom))
+                    target_height = max(1, int(target_height * zoom))
+                resampling = getattr(Image, "Resampling", Image)
+                image.thumbnail((target_width, target_height), getattr(resampling, "LANCZOS", 1))
+                self._put_preview_image(ImageTk.PhotoImage(image), width, height)
+                return
+
+            is_pdf_preview = (
+                path.suffix.lower() == ".pdf"
+                or suffix in EBOOK_TYPES
+                or (suffix in OFFICE_TYPES and path != source_path)
             )
+            if is_pdf_preview and fitz is not None and Image is not None and ImageTk is not None:
+                with fitz.open(path) as document:
+                    if document.page_count:
+                        page = document[0]
+                        zoom = max(0.5, min(1.6, float(self.library.get_setting("preview_zoom", "1.0") or "1.0")))
+                        base_scale = min(target_width / max(1, page.rect.width), target_height / max(1, page.rect.height))
+                        scale = max(0.1, min(2.5, base_scale * zoom))
+                        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                        image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                        self._put_preview_image(ImageTk.PhotoImage(image), width, height)
+                        return
+
+            content = ""
+            try:
+                row = self.selected_row()
+                content = (row["content"] if row else "") or extract_text(source_path)
+            except Exception:
+                content = ""
+            if content.strip():
+                self.preview_image.delete("all")
+                if self.preview_notice:
+                    content = self.preview_notice + "\n\n" + content
+                self.preview_image.create_text(
+                    width - 20, 18, anchor="ne",
+                    text=content[:1100], fill=self.colors["text"],
+                    font=("Segoe UI", 10), justify="right",
+                    width=max(160, width - 40), tags=("preview-text",)
+                )
+                return
+
+            description = file_kind(suffix) + "\n" + (source_path.name[:80])
+            if self.preview_notice:
+                description += "\n\n" + self.preview_notice
+            self._set_preview_placeholder(description)
         except Exception as exc:
-            self.preview_photo = None
-            self._set_preview_placeholder(f"לא ניתן להציג את התמונה\n{exc}")
+            self._set_preview_placeholder(f"לא ניתן להציג תצוגה מקדימה.\n{exc}")
+
+    def _put_preview_image(self, photo, width: int, height: int):
+        self.preview_photo = photo
+        self.preview_image.delete("all")
+        self.preview_image.create_image(
+            width // 2, height // 2,
+            image=self.preview_photo, anchor="center",
+            tags=("preview-image",)
+        )
 
     def _bind_shortcuts(self):
         self.root.bind_all("<Control-f>", self._focus_search)
@@ -1967,8 +2039,11 @@ class App:
         if not row:
             messagebox.showinfo("פתיחת קובץ", "יש לבחור קובץ מהרשימה.")
             return
+        self.library.record_opened(row["id"])
         path = Path(row["stored_path"])
         self.show_viewer(path, row["title"], row["content"])
+        if self.sort_value.get() == "נצפו לאחרונה":
+            self.refresh()
 
     def show_viewer(self, path: Path, title: str, content: str = ""):
         """Show files inside the application; Office files are converted headlessly to PDF."""
@@ -2199,10 +2274,10 @@ class App:
         if not row:
             messagebox.showinfo("הסרה", "יש לבחור קובץ מהרשימה.")
             return
-        if messagebox.askyesno("אישור הסרה", f"האם להסיר את ״{row['title']}״ מהספרייה?\nהקובץ יימחק מתיקיית הנתונים המקומית."):
-            self.library.remove(row["id"])
+        if messagebox.askyesno("אישור הסרה", f"האם להעביר את ״{row['title']}״ לסל המחזור?\nאפשר יהיה לשחזר אותו בהמשך."):
+            self.library.move_to_recycle_bin(row["id"])
             self.refresh()
-            self.status_value.set("הקובץ הוסר.")
+            self.status_value.set("הקובץ הועבר לסל המחזור.")
 
     def open_data_folder(self):
         try:
