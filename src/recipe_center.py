@@ -89,7 +89,7 @@ def parse_recipe_text(text: str) -> dict:
 def is_recipe_record(recipe: dict, content: str = "") -> bool:
     """קובע אם פריט הוא מתכון, בלי להתייחס לכל מסמך כאל מתכון."""
     recipe = recipe if isinstance(recipe, dict) else {}
-    if "is_recipe" in recipe:
+    if recipe.get("is_recipe") is not None and recipe.get("is_recipe") != "":
         return bool(recipe.get("is_recipe"))
     if any(str(recipe.get(key) or "").strip() for key in ("ingredients", "instructions", "category")):
         return True
