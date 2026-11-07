@@ -60,7 +60,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.10.0"
 def _rounded_points(x1, y1, x2, y2, radius=14, steps=8):
     """Create a polygon outline with smooth rounded corners."""
     width = max(1, x2 - x1)
@@ -1303,6 +1303,11 @@ class App:
         self.view_mode = tk.StringVar(value="גלריה")
         self.current_page = "recipes"
         self.nav_buttons = {}
+        self._embedded_pages = []
+        self.reader_preview_mode = tk.StringVar(
+            value=self.library.get_setting("reader_preview_mode", "image")
+        )
+        self._gallery_limit = 60
         self.reader_photos = []
         self._scan_thread = None
         self._import_cancel_event = None
@@ -1473,6 +1478,105 @@ class App:
         )
 
 
+    def _push_embedded_page(self, title=""):
+        """Show a full-size screen inside the existing application window."""
+        if not hasattr(self, "_embedded_pages"):
+            self._embedded_pages = []
+        if self._embedded_pages:
+            try:
+                self._embedded_pages[-1].place_forget()
+            except tk.TclError:
+                pass
+        page = tk.Frame(self.shell, bg=self.colors["background"], bd=0, highlightthickness=0)
+        page.place(relx=0, rely=0, relwidth=1, relheight=1)
+        page.lift()
+        page.page_title = title
+        self._embedded_pages.append(page)
+        return page
+
+    def _pop_embedded_page(self, page=None):
+        """Close the current embedded screen and reveal the previous screen."""
+        stack = getattr(self, "_embedded_pages", [])
+        if not stack:
+            return
+        current = stack[-1]
+        if page is not None and current is not page:
+            try:
+                page.destroy()
+            except tk.TclError:
+                pass
+            try:
+                stack.remove(page)
+            except ValueError:
+                pass
+            return
+        stack.pop()
+        try:
+            current.destroy()
+        except tk.TclError:
+            pass
+        if stack:
+            previous = stack[-1]
+            try:
+                previous.place(relx=0, rely=0, relwidth=1, relheight=1)
+                previous.lift()
+            except tk.TclError:
+                pass
+        else:
+            try:
+                self.shell.lift()
+            except tk.TclError:
+                pass
+
+    def _embedded_header(self, parent, title, subtitle=""):
+        """Create the shared in-app page header with a clear back action."""
+        header = tk.Frame(parent, bg=self.colors["background"], padx=22, pady=16)
+        header.pack(fill="x")
+        title_area = tk.Frame(header, bg=self.colors["background"])
+        title_area.pack(side="right", fill="x", expand=True)
+        tk.Label(
+            title_area, text=title, bg=self.colors["background"],
+            fg=self.colors["navy"], font=("Segoe UI", 22, "bold"), anchor="e"
+        ).pack(fill="x")
+        if subtitle:
+            tk.Label(
+                title_area, text=subtitle, bg=self.colors["background"],
+                fg=self.colors["muted"], font=("Segoe UI", 9), anchor="e"
+            ).pack(fill="x", pady=(3, 0))
+        ModernButton(
+            header, text="→  חזרה לספרייה",
+            command=lambda target=parent: self._pop_embedded_page(target),
+            width=150, height=40, bg=self.colors["surface"],
+            fg=self.colors["navy"], hover_bg=self.colors["soft"],
+            active_bg=self.colors["selected"], radius=13,
+            font=("Segoe UI", 9, "bold"), canvas_bg=self.colors["background"]
+        ).pack(side="left", padx=(0, 5))
+        return header
+
+    def _save_reader_sash_position(self, _event=None):
+        try:
+            width = max(1, self.content_splitter.winfo_width())
+            sash_x = self.content_splitter.sash_coord(0)[0]
+            reader_width = max(300, width - sash_x)
+            self.library.set_setting("reader_pane_width", str(reader_width))
+        except (tk.TclError, ValueError, IndexError):
+            pass
+
+    def _set_reader_preview_mode(self, mode):
+        if mode not in ("image", "text"):
+            return
+        self.reader_preview_mode.set(mode)
+        self.library.set_setting("reader_preview_mode", mode)
+        self._update_reader_mode_buttons()
+        self._render_reader(self.selected_row())
+
+    def _update_reader_mode_buttons(self):
+        if not hasattr(self, "reader_image_button"):
+            return
+        active = self.reader_preview_mode.get()
+        self.reader_image_button.set_active(active == "image")
+        self.reader_text_button.set_active(active == "text")
+
     def _build(self):
         """Modern, airy recipe-first home with rounded surfaces and quiet navigation."""
         c = self.colors
@@ -1633,12 +1737,18 @@ class App:
 
         content_area = tk.Frame(workspace, bg=c["background"])
         content_area.pack(fill="both", expand=True)
-        reader_shell = RoundedPanel(
-            content_area, surface=c["surface"], background=c["background"],
-            outline=c["border"], shadow=c["shadow"], radius=21,
-            padding=2, width=328, show_shadow=True
+        self.content_splitter = tk.PanedWindow(
+            content_area, orient="horizontal", background=c["background"],
+            sashwidth=9, sashpad=3, sashrelief="flat", borderwidth=0,
+            relief="flat", opaqueresize=True, showhandle=False
         )
-        reader_shell.pack(side="right", fill="y", padx=(14, 0))
+        self.content_splitter.pack(fill="both", expand=True)
+        self.content_splitter.bind("<ButtonRelease-1>", self._save_reader_sash_position)
+        reader_shell = RoundedPanel(
+            self.content_splitter, surface=c["surface"], background=c["background"],
+            outline=c["border"], shadow=c["shadow"], radius=21,
+            padding=2, width=370, show_shadow=True
+        )
         self.reader_panel = reader_shell.content
         reader_heading = tk.Frame(self.reader_panel, bg=c["surface"], padx=17, pady=15)
         reader_heading.pack(fill="x")
@@ -1651,6 +1761,24 @@ class App:
             bg=c["surface"], fg=c["muted"], font=("Segoe UI", 8), anchor="e"
         ).pack(fill="x", pady=(3, 0))
         tk.Frame(self.reader_panel, bg=c["border"], height=1).pack(fill="x", padx=16, pady=(0, 4))
+        preview_modes = tk.Frame(self.reader_panel, bg=c["surface"])
+        preview_modes.pack(fill="x", padx=12, pady=(7, 6))
+        self.reader_image_button = ModernButton(
+            preview_modes, text="תמונה מקורית",
+            command=lambda: self._set_reader_preview_mode("image"),
+            width=132, height=34, bg=c["row_alt"], fg=c["muted"],
+            hover_bg=c["soft"], active_bg=c["sidebar_active"],
+            radius=11, font=("Segoe UI", 8, "bold"), canvas_bg=c["surface"]
+        )
+        self.reader_image_button.pack(side="right", fill="x", expand=True, padx=3)
+        self.reader_text_button = ModernButton(
+            preview_modes, text="טקסט שחולץ",
+            command=lambda: self._set_reader_preview_mode("text"),
+            width=132, height=34, bg=c["row_alt"], fg=c["muted"],
+            hover_bg=c["soft"], active_bg=c["sidebar_active"],
+            radius=11, font=("Segoe UI", 8, "bold"), canvas_bg=c["surface"]
+        )
+        self.reader_text_button.pack(side="right", fill="x", expand=True, padx=3)
 
         reader_canvas_frame = tk.Frame(self.reader_panel, bg=c["surface"])
         reader_canvas_frame.pack(fill="both", expand=True, padx=(7, 4), pady=(0, 8))
@@ -1665,11 +1793,20 @@ class App:
         self.reader_canvas.bind("<Configure>", lambda event: self.reader_canvas.itemconfigure(self.reader_window, width=event.width))
 
         catalog_shell = RoundedPanel(
-            content_area, surface=c["surface"], background=c["background"],
+            self.content_splitter, surface=c["surface"], background=c["background"],
             outline=c["border"], shadow=c["shadow"], radius=21,
             padding=2, show_shadow=True
         )
-        catalog_shell.pack(side="left", fill="both", expand=True)
+        self.content_splitter.add(catalog_shell, minsize=440, stretch="always")
+        self.content_splitter.add(reader_shell, minsize=320, stretch="always")
+        def restore_reader_width():
+            try:
+                saved_width = int(self.library.get_setting("reader_pane_width", "385"))
+            except (TypeError, ValueError):
+                saved_width = 385
+            target = max(440, self.content_splitter.winfo_width() - max(320, min(900, saved_width)))
+            self.content_splitter.sash_place(0, target, 0)
+        self.content_splitter.after_idle(restore_reader_width)
         catalog = catalog_shell.content
         catalog_header = tk.Frame(catalog, bg=c["surface"], padx=20, pady=16)
         catalog_header.pack(fill="x")
@@ -1738,6 +1875,7 @@ class App:
         self.status_label.pack(fill="x")
         self._update_navigation_active()
         self._update_view_buttons()
+        self._update_reader_mode_buttons()
         self._render_reader(None)
 
     def _add_nav_button(self, parent, key, glyph, label):
@@ -1861,12 +1999,16 @@ class App:
         for item_id, card in getattr(self, "gallery_cards", {}).items():
             selected = str(item_id) == str(self.selected_item_id)
             try:
-                if isinstance(card, RoundedPanel):
+                if hasattr(card, "set_outline"):
                     card.set_outline(self.colors["accent"] if selected else self.colors["border"])
                 else:
-                    card.configure(highlightbackground=self.colors["accent"] if selected else self.colors["border"], highlightthickness=3 if selected else 1)
+                    card.configure(
+                        highlightbackground=self.colors["accent"] if selected else self.colors["border"],
+                        highlightthickness=3 if selected else 1
+                    )
             except tk.TclError:
                 pass
+
 
     def _render_gallery(self, ranked):
         for child in self.gallery_inner.winfo_children():
@@ -2274,8 +2416,44 @@ class App:
         image_path = str(data.get("image_path") or "")
         if not image_path and row["extension"].lower() in IMAGE_TYPES:
             image_path = row["stored_path"]
-        photo = None
-        if image_path and Image is not None and ImageTk is not None:
+        mode = self.reader_preview_mode.get()
+        if mode == "text":
+            source_text = str(row["content"] or "").strip()
+            if not source_text:
+                source_text = "\n\n".join(
+                    part for part in (
+                        data.get("ingredients", ""),
+                        data.get("instructions", ""),
+                        data.get("notes", "")
+                    ) if part
+                )
+            if not source_text:
+                source_text = "לא נשמר טקסט שחולץ מהקובץ הזה."
+            text_shell = RoundedPanel(
+                self.reader_inner, surface=c["row_alt"], background=c["surface"],
+                outline=c["border"], shadow=c["shadow"], radius=16,
+                padding=2, height=245, show_shadow=False
+            )
+            text_shell.pack(fill="x", padx=12, pady=(10, 11))
+            text_body = tk.Frame(text_shell.content, bg=c["row_alt"])
+            text_body.pack(fill="both", expand=True, padx=8, pady=8)
+            text_area = tk.Text(
+                text_body, height=10, wrap="word", font=("Segoe UI", 10),
+                bg=c["row_alt"], fg=c["text"], relief="flat", bd=0,
+                padx=9, pady=7
+            )
+            text_scroll = ttk.Scrollbar(text_body, orient="vertical", command=text_area.yview)
+            text_area.configure(yscrollcommand=text_scroll.set)
+            text_scroll.pack(side="left", fill="y")
+            text_area.pack(side="right", fill="both", expand=True)
+            text_area.insert("1.0", source_text)
+            text_area.tag_configure("rtl", justify="right")
+            text_area.tag_add("rtl", "1.0", "end")
+            text_area.configure(state="disabled")
+            photo = None
+        else:
+            photo = None
+        if mode == "image" and image_path and Image is not None and ImageTk is not None:
             try:
                 with Image.open(image_path) as source:
                     source = ImageOps.exif_transpose(source).convert("RGB")
@@ -2293,7 +2471,7 @@ class App:
                 self.reader_photos.append(photo)
             except Exception:
                 photo = None
-        if photo is None and row["extension"].lower() == ".pdf" and fitz is not None and Image is not None and ImageTk is not None:
+        if mode == "image" and photo is None and row["extension"].lower() == ".pdf" and fitz is not None and Image is not None and ImageTk is not None:
             try:
                 with fitz.open(row["stored_path"]) as document:
                     if document.page_count:
@@ -2305,11 +2483,11 @@ class App:
             except Exception:
                 photo = None
 
-        if photo is not None:
+        if mode == "image" and photo is not None:
             image_label = tk.Label(self.reader_inner, image=photo, bg=c["surface"], highlightthickness=0, bd=0)
             image_label.image = photo
             image_label.pack(fill="x", padx=12, pady=(10, 11))
-        else:
+        elif mode == "image":
             cover = RoundedPanel(
                 self.reader_inner, surface=c["cover"], background=c["surface"],
                 outline=c["border"], shadow=c["shadow"], radius=17,
@@ -2429,15 +2607,10 @@ class App:
     def open_collections_dialog(self):
         row = self.selected_row()
         item_id = int(row["id"]) if row else None
-        dialog = tk.Toplevel(self.root)
-        dialog.title("ניהול אוספים")
-        dialog.geometry("500x540")
-        dialog.minsize(420, 360)
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.configure(background=self.colors["background"])
-
+        dialog = self._push_embedded_page("ניהול אוספים")
+        self._embedded_header(dialog, "ניהול אוספים", "סידור המתכונים באוספים אישיים.")
         outer = ttk.Frame(dialog, padding=18, style="App.TFrame")
+        outer.pack(fill="both", expand=True)
         outer.pack(fill="both", expand=True)
         ttk.Label(outer, text="האוספים שלי", style="Section.TLabel").pack(fill="x", anchor="e")
         description = (
@@ -2518,7 +2691,7 @@ class App:
             buttons, text="＋ יצירת אוסף חדש",
             style="Primary.TButton", command=create_collection
         ).pack(side="right")
-        ttk.Button(buttons, text="סגירה", command=dialog.destroy).pack(side="left")
+        ttk.Button(buttons, text="חזרה לספרייה", command=lambda: self._pop_embedded_page(dialog)).pack(side="left")
 
     def _schedule_preview_resize(self, _event=None):
         if self.preview_path is None:
@@ -2717,13 +2890,8 @@ class App:
         data = self.library.get_recipe_data(item_id)
         tags = self.library.tag_names(item_id)
 
-        window = tk.Toplevel(self.root)
-        window.title(f"פרטי מתכון – {row['title']}")
-        window.geometry("900x820")
-        window.minsize(760, 650)
-        window.transient(self.root)
-        window.configure(background=self.colors["background"])
-
+        window = self._push_embedded_page(f"פרטי מתכון – {row['title']}")
+        self._embedded_header(window, "פרטי המתכון", row["title"])
         outer = ttk.Frame(window, padding=18, style="App.TFrame")
         outer.pack(fill="both", expand=True)
         ttk.Label(outer, text="פרטי המתכון", style="Section.TLabel").pack(fill="x", anchor="e")
@@ -2856,9 +3024,8 @@ class App:
                 return
             current = ingredients_text.get("1.0", "end-1c")
             scaled = scale_ingredient_amounts(current, base, target)
-            result = tk.Toplevel(window)
-            result.title(f"כמויות ל־{target} מנות")
-            result.geometry("520x560")
+            result = self._push_embedded_page(f"כמויות ל־{target} מנות")
+            self._embedded_header(result, f"כמויות ל־{target} מנות", "חישוב כמויות לפי מספר המנות שבחרתם.")
             frame = ttk.Frame(result, padding=14, style="App.TFrame")
             frame.pack(fill="both", expand=True)
             ttk.Label(frame, text=f"המצרכים ל־{target} מנות", style="Section.TLabel").pack(fill="x")
@@ -2908,9 +3075,8 @@ class App:
                 "הוראות – הגרסה השמורה:\n" + str(version.get("instructions") or "") + "\n\n"
                 "הוראות – הגרסה הנוכחית בחלון:\n" + instructions_text.get("1.0", "end-1c").strip()
             )
-            result = tk.Toplevel(window)
-            result.title("השוואת גרסאות")
-            result.geometry("760x650")
+            result = self._push_embedded_page("השוואת גרסאות")
+            self._embedded_header(result, "השוואת גרסאות", "השוואה בין הטקסט השמור לבין הגרסה הנוכחית.")
             text_area = tk.Text(result, wrap="word", font=("Segoe UI", 10), padx=12, pady=12)
             text_area.pack(fill="both", expand=True)
             text_area.insert("1.0", comparison)
@@ -2962,24 +3128,22 @@ class App:
                 self.library.set_item_tags(item_id, tags_var.get().split(","))
                 self.refresh()
                 self.status_value.set("פרטי המתכון והתגיות נשמרו.")
-                window.destroy()
+                self._pop_embedded_page(window)
             except Exception as exc:
                 messagebox.showerror("שמירת מתכון", str(exc), parent=window)
 
         ttk.Button(buttons, text="שמירת הפרטים", style="Primary.TButton", command=save_recipe).pack(side="right")
-        ttk.Button(buttons, text="סגירה", command=window.destroy).pack(side="left")
+        ttk.Button(buttons, text="חזרה", command=lambda: self._pop_embedded_page(window)).pack(side="left")
 
 
     def open_ocr_scanner(self):
-        """Open an offline OCR workspace with source preview and editable recipe fields."""
-        window = tk.Toplevel(self.root)
-        window.title("סורק מתכונים חכם")
-        window.geometry("1360x880")
-        window.minsize(1050, 700)
-        window.configure(background=self.colors["background"])
-        window.transient(self.root)
-
-        outer = tk.Frame(window, bg=self.colors["background"], padx=18, pady=16)
+        """Open the OCR workspace as a page inside the main application."""
+        window = self._push_embedded_page("סורק מתכונים חכם")
+        self._embedded_header(
+            window, "סורק מתכונים חכם",
+            "סריקה, תיקון הזיהוי ושמירת המתכון — בלי לפתוח חלון נוסף."
+        )
+        outer = tk.Frame(window, bg=self.colors["background"], padx=18, pady=8)
         outer.pack(fill="both", expand=True)
         tk.Label(outer, text="סורק מתכונים חכם", bg=self.colors["background"],
                  fg=self.colors["navy"], font=("Segoe UI", 22, "bold"), anchor="e").pack(fill="x")
@@ -3243,8 +3407,8 @@ class App:
             self.filter_value.set("כל הקבצים")
             self.recipe_filter_value.set("מתכונים בלבד")
             self.view_mode.set("גלריה")
+            self._pop_embedded_page(window)
             self._rebuild_shell()
-            window.destroy()
             self.status_value.set("המתכון נסרק ונשמר בספרייה.")
             messagebox.showinfo("המתכון נשמר", "המתכון נוסף לספרייה בהצלחה.", parent=self.root)
 
@@ -3266,7 +3430,7 @@ class App:
                                 relief="flat", bd=0, padx=18, pady=8, cursor="hand2",
                                 font=("Segoe UI", 9, "bold"))
         save_button.pack(side="left", padx=4)
-        tk.Button(toolbar, text="סגירה", command=window.destroy,
+        tk.Button(toolbar, text="חזרה לספרייה", command=lambda: self._pop_embedded_page(window),
                   bg=self.colors["row_alt"], fg=self.colors["navy"], activebackground=self.colors["selected"],
                   relief="flat", bd=0, padx=14, pady=8, cursor="hand2",
                   font=("Segoe UI", 9)).pack(side="left", padx=4)
@@ -3303,11 +3467,10 @@ class App:
                     found.append((score, first, second))
         found.sort(key=lambda item: item[0], reverse=True)
 
-        dialog = tk.Toplevel(self.root)
-        dialog.title("איתור מתכונים וקבצים דומים")
-        dialog.geometry("900x560")
-        dialog.transient(self.root)
+        dialog = self._push_embedded_page("איתור פריטים דומים")
+        self._embedded_header(dialog, "איתור מתכונים וקבצים דומים", "הצגת התאמות אפשריות בלי למחוק שום דבר אוטומטית.")
         frame = ttk.Frame(dialog, padding=15, style="App.TFrame")
+        frame.pack(fill="both", expand=True)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="פריטים דומים לבדיקה", style="Section.TLabel").pack(fill="x", anchor="e")
         ttk.Label(
@@ -3331,14 +3494,13 @@ class App:
                     "", "end",
                     values=(f"{score * 100:.0f}%", second["title"], first["title"])
                 )
-        ttk.Button(frame, text="סגירה", command=dialog.destroy).pack(anchor="w", pady=(10, 0))
+        ttk.Button(frame, text="חזרה לספרייה", command=lambda: self._pop_embedded_page(dialog)).pack(anchor="w", pady=(10, 0))
 
     def open_recycle_bin(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("סל המחזור")
-        dialog.geometry("850x520")
-        dialog.transient(self.root)
+        dialog = self._push_embedded_page("סל המחזור")
+        self._embedded_header(dialog, "סל המחזור", "שחזור פריטים או מחיקה סופית.")
         frame = ttk.Frame(dialog, padding=15, style="App.TFrame")
+        frame.pack(fill="both", expand=True)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="סל המחזור", style="Section.TLabel").pack(fill="x", anchor="e")
         ttk.Label(
@@ -3369,7 +3531,7 @@ class App:
                 return
             self.library.restore_from_recycle_bin(int(selected[0]))
             self.refresh()
-            dialog.destroy()
+            self._pop_embedded_page(dialog)
             self.status_value.set("הקובץ שוחזר מסל המחזור.")
 
         def delete_forever():
@@ -3388,7 +3550,7 @@ class App:
 
         ttk.Button(controls, text="שחזור פריט", style="Primary.TButton", command=restore).pack(side="right")
         ttk.Button(controls, text="מחיקה לצמיתות", style="Danger.TButton", command=delete_forever).pack(side="right", padx=6)
-        ttk.Button(controls, text="סגירה", command=dialog.destroy).pack(side="left")
+        ttk.Button(controls, text="חזרה לספרייה", command=lambda: self._pop_embedded_page(dialog)).pack(side="left")
 
     def restore_backup(self):
         source = filedialog.askopenfilename(
@@ -3470,12 +3632,8 @@ class App:
         self._import_cancel_event = cancel_event
         state = {"added": 0, "skipped": 0, "failed": 0, "processed": 0}
 
-        progress_window = tk.Toplevel(self.root)
-        progress_window.title("ייבוא ספרייה")
-        progress_window.geometry("520x190")
-        progress_window.minsize(460, 180)
-        progress_window.transient(self.root)
-        progress_window.grab_set()
+        progress_window = self._push_embedded_page("ייבוא ספרייה")
+        self._embedded_header(progress_window, "ייבוא ספרייה", "סריקת הקבצים והכנתם לספרייה.")
         frame = ttk.Frame(progress_window, padding=18, style="App.TFrame")
         frame.pack(fill="both", expand=True)
         progress_text = tk.StringVar(value=f"מכין לייבוא {len(paths)} קבצים…")
@@ -3495,7 +3653,6 @@ class App:
                 cancel_button.configure(state="disabled")
                 progress_text.set("מבטל… הקובץ הנוכחי יסיים עיבוד לפני העצירה.")
         cancel_button.configure(command=request_cancel)
-        progress_window.protocol("WM_DELETE_WINDOW", request_cancel)
 
         def publish_result(record, allow_after_cancel=False):
             while True:
@@ -3546,8 +3703,7 @@ class App:
 
         def finish_import(record=None):
             try:
-                progress_window.grab_release()
-                progress_window.destroy()
+                self._pop_embedded_page(progress_window)
             except tk.TclError:
                 pass
             self._import_cancel_event = None
@@ -3621,19 +3777,9 @@ class App:
             self.refresh()
 
     def show_viewer(self, path: Path, title: str, content: str = ""):
-        """Show files inside the application; Office files are converted headlessly to PDF."""
-        window = tk.Toplevel(self.root)
-        window.title(title)
-        window.geometry("1320x920")
-        window.minsize(820, 620)
-        window.configure(background=self.colors["background"])
-        window.transient(self.root)
-        header = ttk.Frame(window, padding=(16, 12), style="Panel.TFrame")
-        header.pack(fill="x", padx=12, pady=(12, 4))
-        ttk.Label(header, text=title, style="Header.TLabel", anchor="e").pack(fill="x")
-        body = ttk.Frame(window, padding=10, style="App.TFrame")
-        body.pack(fill="both", expand=True)
-
+        """Open a file preview as an in-app page with original/text switching."""
+        path = Path(path)
+        window = self._push_embedded_page(title)
         suffix = path.suffix.lower()
         preview_path = path
         temporary_directory = None
@@ -3641,38 +3787,109 @@ class App:
         if suffix in OFFICE_TYPES:
             preview_path, temporary_directory, notice = convert_office_to_pdf(path)
 
-        preview_document = None
-        if suffix in IMAGE_TYPES and Image is not None:
-            self._show_image_in_viewer(body, path)
-        elif (suffix == ".pdf" or suffix in EBOOK_TYPES or preview_path != path) and fitz is not None and Image is not None:
-            preview_document = self._show_pdf_in_viewer(body, preview_path, window)
-        else:
-            if notice:
-                ttk.Label(
-                    body,
-                    text=notice,
-                    foreground="#9A4B18",
-                    background="#FFF4E5",
-                    padding=10,
-                    wraplength=950,
-                    justify="right",
-                ).pack(fill="x", pady=(0, 8))
-            text = content or extract_text(path)
-            if not text:
-                text = "לא ניתן להציג כרגע תצוגה חזותית לקובץ הזה. הקובץ נשאר שמור בספרייה."
-            self._show_text_in_viewer(body, text)
+        document_state = {"document": None}
+        content_host = tk.Frame(window, bg=self.colors["background"])
+        content_host.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+        extracted_text = content or ""
+        if not extracted_text:
+            try:
+                extracted_text = extract_text(path)
+            except Exception as exc:
+                extracted_text = f"לא ניתן לחלץ טקסט מהקובץ: {exc}"
+
+        def clear_content():
+            document = document_state.get("document")
+            if document is not None:
+                try:
+                    document.close()
+                except Exception:
+                    pass
+                document_state["document"] = None
+            for child in content_host.winfo_children():
+                child.destroy()
 
         def close_preview():
-            try:
-                if preview_document is not None:
-                    preview_document.close()
-            except Exception:
-                pass
+            clear_content()
             if temporary_directory is not None:
                 shutil.rmtree(temporary_directory, ignore_errors=True)
-            window.destroy()
+            self._pop_embedded_page(window)
 
-        window.protocol("WM_DELETE_WINDOW", close_preview)
+        header = tk.Frame(window, bg=self.colors["background"], padx=20, pady=14)
+        header.pack(fill="x")
+        title_area = tk.Frame(header, bg=self.colors["background"])
+        title_area.pack(side="right", fill="x", expand=True)
+        tk.Label(
+            title_area, text=title, bg=self.colors["background"],
+            fg=self.colors["navy"], font=("Segoe UI", 20, "bold"), anchor="e"
+        ).pack(fill="x")
+        tk.Label(
+            title_area, text="תצוגת המקור או הטקסט שחולץ מהקובץ.",
+            bg=self.colors["background"], fg=self.colors["muted"],
+            font=("Segoe UI", 9), anchor="e"
+        ).pack(fill="x", pady=(3, 0))
+        ModernButton(
+            header, text="→  חזרה",
+            command=close_preview, width=108, height=39,
+            bg=self.colors["surface"], fg=self.colors["navy"],
+            hover_bg=self.colors["soft"], active_bg=self.colors["selected"],
+            radius=13, font=("Segoe UI", 9, "bold"),
+            canvas_bg=self.colors["background"]
+        ).pack(side="left")
+
+        controls = tk.Frame(window, bg=self.colors["background"], padx=20, pady=(0, 9))
+        controls.pack(fill="x")
+        if notice:
+            ttk.Label(
+                controls, text=notice, foreground="#9A4B18",
+                background="#FFF4E5", padding=8, wraplength=1100, justify="right"
+            ).pack(fill="x", pady=(0, 8))
+
+        def render_preview(mode):
+            clear_content()
+            if mode == "text":
+                self._show_text_in_viewer(
+                    content_host, extracted_text or "לא קיים טקסט שחולץ מהקובץ."
+                )
+                text_button.set_active(True)
+                source_button.set_active(False)
+                return
+
+            text_button.set_active(False)
+            source_button.set_active(True)
+            if suffix in IMAGE_TYPES and Image is not None:
+                self._show_image_in_viewer(content_host, path)
+            elif (suffix == ".pdf" or suffix in EBOOK_TYPES or preview_path != path) and fitz is not None and Image is not None:
+                document_state["document"] = self._show_pdf_in_viewer(content_host, preview_path, window)
+            else:
+                self._show_text_in_viewer(
+                    content_host, extracted_text or "אין לקובץ זה תצוגה חזותית זמינה."
+                )
+
+        source_button = ModernButton(
+            controls, text="▧  תמונה / מסמך מקורי",
+            command=lambda: render_preview("source"),
+            width=190, height=38, bg=self.colors["surface"],
+            fg=self.colors["navy"], hover_bg=self.colors["soft"],
+            active_bg=self.colors["sidebar_active"], radius=12,
+            font=("Segoe UI", 9, "bold"), canvas_bg=self.colors["background"]
+        )
+        source_button.pack(side="right", padx=(0, 6))
+        text_button = ModernButton(
+            controls, text="☷  טקסט שחולץ",
+            command=lambda: render_preview("text"),
+            width=150, height=38, bg=self.colors["surface"],
+            fg=self.colors["navy"], hover_bg=self.colors["soft"],
+            active_bg=self.colors["sidebar_active"], radius=12,
+            font=("Segoe UI", 9, "bold"), canvas_bg=self.colors["background"]
+        )
+        text_button.pack(side="right", padx=6)
+
+        initial_mode = "source" if (
+            suffix in IMAGE_TYPES or suffix == ".pdf" or suffix in EBOOK_TYPES or preview_path != path
+        ) else "text"
+        render_preview(initial_mode)
+
+
 
     def _show_text_in_viewer(self, parent, text: str):
         text_frame = ttk.Frame(parent)
@@ -3804,31 +4021,21 @@ class App:
     def _show_image_in_viewer(self, parent, path: Path):
         try:
             parent.update_idletasks()
-            width = max(1100, parent.winfo_width() - 70)
-            height = max(760, parent.winfo_height() - 70)
+            width = max(320, parent.winfo_width() - 56)
+            height = max(240, parent.winfo_height() - 56)
             with Image.open(path) as source:
-                source.seek(0)
-                image = source.copy()
-            resampling = getattr(Image, "Resampling", Image)
-            image.thumbnail((width, height), getattr(resampling, "LANCZOS", 1))
+                image = ImageOps.exif_transpose(source).copy() if ImageOps is not None else source.copy()
+            image.thumbnail(
+                (width, height),
+                getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+            )
             photo = ImageTk.PhotoImage(image)
             label = ttk.Label(parent, image=photo, style="Panel.TLabel")
             label.image = photo
             label.pack(expand=True, fill="both")
         except Exception as exc:
-            ttk.Label(parent, text=f"לא ניתן להציג את התמונה: {exc}").pack()
+            ttk.Label(parent, text=f"לא ניתן להציג את התמונה: {exc}").pack(expand=True)
 
-
-        try:
-            image = Image.open(path)
-            image.seek(0)
-            image.thumbnail((900, 650))
-            photo = ImageTk.PhotoImage(image.copy())
-            label = ttk.Label(parent, image=photo)
-            label.image = photo
-            label.pack(expand=True)
-        except Exception as exc:
-            ttk.Label(parent, text=f"לא ניתן להציג את התמונה: {exc}").pack()
 
     def rename_selected(self):
         row = self.selected_row()
@@ -3877,12 +4084,8 @@ class App:
             messagebox.showerror("שגיאה ביצירת גיבוי", str(exc))
 
     def settings(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("הגדרות")
-        dialog.geometry("620x570")
-        dialog.minsize(540, 480)
-        dialog.transient(self.root)
-        dialog.grab_set()
+        dialog = self._push_embedded_page("הגדרות")
+        self._embedded_header(dialog, "הגדרות", "התאמת המראה ואפשרויות העבודה של הספרייה.")
         frame = ttk.Frame(dialog, padding=18, style="App.TFrame")
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="הגדרות הספרייה", style="Section.TLabel").pack(fill="x", pady=(0, 12))
@@ -3940,7 +4143,8 @@ class App:
             if auto_var.get() and not was_enabled and not self.library.get_setting("last_auto_backup", ""):
                 self.library.set_setting("last_auto_backup", datetime.now().isoformat(timespec="seconds"))
             self._apply_styles()
-            dialog.destroy()
+            self._pop_embedded_page(dialog)
+            self._apply_styles()
             self._rebuild_shell()
             self.status_value.set("ההגדרות נשמרו.")
 
@@ -3948,7 +4152,7 @@ class App:
         buttons.pack(fill="x", pady=(14, 0))
         ttk.Button(buttons, text="פתיחת תיקיית הנתונים", command=self.open_data_folder).pack(side="right")
         ttk.Button(buttons, text="שמירה והחלה", style="Primary.TButton", command=save_settings).pack(side="right", padx=8)
-        ttk.Button(buttons, text="סגירה", command=dialog.destroy).pack(side="left")
+        ttk.Button(buttons, text="חזרה", command=lambda: self._pop_embedded_page(dialog)).pack(side="left")
 
     def close(self):
         active_import = getattr(self, "_import_cancel_event", None)

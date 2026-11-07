@@ -331,15 +331,13 @@ class RecipeCenter:
 
     def show(self, initial_item_id=None):
         app = self.app
-        window = tk.Toplevel(app.root)
-        window.title("מרכז המתכונים")
-        window.geometry("1160x800")
-        window.minsize(920, 650)
-        window.transient(app.root)
-        window.configure(background=app.colors["background"])
+        window = app._push_embedded_page("מרכז המתכונים")
+        app._embedded_header(
+            window, "מרכז המתכונים",
+            "הדפסה, רשימות קניות, תכנון שבועי, כרטיסי מתכון ומצב בישול."
+        )
         outer = ttk.Frame(window, padding=16, style="App.TFrame")
         outer.pack(fill="both", expand=True)
-        ttk.Label(outer, text="מרכז המתכונים", style="Section.TLabel").pack(fill="x", anchor="e")
         ttk.Label(
             outer, text="כלי עזר לעבודה עם המתכונים — בלי לשנות את מסך הספרייה וניהול הקבצים.",
             style="Muted.TLabel"
@@ -373,7 +371,7 @@ class RecipeCenter:
 
         if not self.records:
             ttk.Label(outer, text="הספרייה עדיין ריקה. הוסיפו קבצים או מתכונים כדי להתחיל.", style="Muted.TLabel").pack(fill="both", expand=True)
-            ttk.Button(outer, text="סגירה", command=window.destroy).pack(anchor="w")
+            ttk.Button(outer, text="חזרה לספרייה", command=lambda: app._pop_embedded_page(window)).pack(anchor="w")
             return window
 
         notebook = ttk.Notebook(outer)
@@ -498,10 +496,7 @@ class RecipeCenter:
                 app.status_value.set(f"חוברת PDF נוצרה: {result.name}")
                 messagebox.showinfo("החוברת מוכנה", f"קובץ PDF נוצר בהצלחה.\n\n{result}\n\nאפשר לפתוח אותו ולהדפיס במדפסת הרגילה.", parent=window)
                 if open_var.get():
-                    try:
-                        os.startfile(str(result))
-                    except (AttributeError, OSError):
-                        webbrowser.open(result.as_uri())
+                    app.show_viewer(result, "חוברת המתכונים – תצוגת PDF")
             except Exception as exc:
                 messagebox.showerror("שגיאה ביצירת PDF", f"לא ניתן ליצור את החוברת.\n{exc}\n\nבדקו שתיקיית LibreOffice נמצאת לצד קובץ התוכנה.", parent=window)
 

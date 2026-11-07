@@ -8,6 +8,7 @@ on:
       - '.github/workflows/build-windows.yml'
       - 'tests/**'
       - 'assets/**'
+      - 'scripts/**'
   workflow_dispatch:
 
 permissions:
@@ -226,6 +227,32 @@ jobs:
           if ($process.HasExited) { throw "The packaged application exited during startup" }
           Stop-Process -Id $process.Id -Force
           Write-Host "Packaged app launch check passed."
+
+      - name: צילום מסך אמיתי של הממשק מתוך Windows
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "recipe-ui-demo-profile"
+          python scripts/create_ui_demo_data.py
+          $exe = "dist/חבילת-ספריית-המתכונים/ספריית_המתכונים_שלי.exe"
+          $process = Start-Process -FilePath $exe -PassThru
+          try {
+            Start-Sleep -Seconds 8
+            python scripts/capture_app_screenshot.py --output "dist/recipe-library-real-ui.png"
+          } finally {
+            if ($process -and !$process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
+
+      - name: שמירת צילום מסך אמיתי של הממשק
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: צילום-מסך-אמיתי-של-התוכנה
+          path: dist/recipe-library-real-ui.png
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: שמירת קובץ ההפעלה להורדה
         uses: actions/upload-artifact@v4
