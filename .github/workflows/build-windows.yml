@@ -228,7 +228,60 @@ jobs:
           taskkill /PID $process.Id /T /F | Out-Null
           Write-Host "Packaged app launch check passed and process tree was stopped."
 
-      - name: צילום מסך אמיתי של הממשק מתוך Windows
+
+      - name: שמירת קובץ ההפעלה להורדה
+        uses: actions/upload-artifact@v4
+        with:
+          name: ספריית-המתכונים-שלי-Windows
+          path: dist/ספריית_המתכונים_שלי.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: שמירת חבילת Windows מלאה להורדה
+        uses: actions/upload-artifact@v4
+        with:
+          name: ספריית-המתכונים-שלי-Windows-כולל-Office
+          path: dist/ספריית-המתכונים-שלי-Windows-כולל-תצוגת-Office.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  capture-screenshot:
+    name: הרצה שנייה – צילום מסך לאחר בדיקות תקינות
+    needs: build-windows
+    runs-on: windows-latest
+    steps:
+      - name: הורדת קובצי הפרויקט
+        uses: actions/checkout@v4
+
+      - name: התקנת סביבת פייתון לצילום
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: התקנת ספריות להצגת נתוני ההדגמה
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install PyMuPDF python-docx striprtf pillow tkinterdnd2 pytesseract openpyxl python-pptx
+
+      - name: הורדת חבילת Windows מההרצה הראשונה
+        uses: actions/download-artifact@v4
+        with:
+          name: ספריית-המתכונים-שלי-Windows-כולל-Office
+          path: artifacts
+
+      - name: חילוץ חבילת התוכנה
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem -LiteralPath "artifacts" -Filter "*.zip" -File | Select-Object -First 1
+          if (!$archive) { throw "The verified Windows package was not found." }
+          $packageRoot = "dist/חבילת-ספריית-המתכונים"
+          New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $packageRoot -Force
+          $exe = Join-Path $packageRoot "ספריית_המתכונים_שלי.exe"
+          if (!(Test-Path $exe)) { throw "The application executable is missing from the verified package." }
+          if (!(Test-Path (Join-Path $packageRoot "LibreOffice.zip"))) { throw "LibreOffice.zip is missing from the verified package." }
+
+      - name: הרצת התוכנה מחדש וצילום מסך אמיתי
         shell: pwsh
         run: |
           $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "recipe-ui-demo-profile"
@@ -236,10 +289,11 @@ jobs:
           $env:PYTHONUTF8 = "1"
           python scripts/create_ui_demo_data.py
           if ($LASTEXITCODE -ne 0) { throw "Demo library creation failed." }
+
           $exe = "dist/חבילת-ספריית-המתכונים/ספריית_המתכונים_שלי.exe"
           $process = Start-Process -FilePath $exe -PassThru
           try {
-            Start-Sleep -Seconds 10
+            Start-Sleep -Seconds 12
             python scripts/capture_app_screenshot.py --output "dist/recipe-library-real-ui.png" --process-id $process.Id --expected-items 6
             if ($LASTEXITCODE -ne 0) { throw "Real application screenshot validation failed." }
             $shot = Get-Item "dist/recipe-library-real-ui.png" -ErrorAction Stop
@@ -257,21 +311,5 @@ jobs:
         with:
           name: צילום-מסך-אמיתי-של-התוכנה
           path: dist/recipe-library-real-ui.png
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: שמירת קובץ ההפעלה להורדה
-        uses: actions/upload-artifact@v4
-        with:
-          name: ספריית-המתכונים-שלי-Windows
-          path: dist/ספריית_המתכונים_שלי.exe
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: שמירת חבילת Windows מלאה להורדה
-        uses: actions/upload-artifact@v4
-        with:
-          name: ספריית-המתכונים-שלי-Windows-כולל-Office
-          path: dist/ספריית-המתכונים-שלי-Windows-כולל-תצוגת-Office.zip
           if-no-files-found: error
           retention-days: 30

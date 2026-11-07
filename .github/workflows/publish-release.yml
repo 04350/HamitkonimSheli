@@ -48,6 +48,33 @@ jobs:
             echo "A newer commit is already on main; skipping this older build."
           fi
 
+      - name: בדיקת קיום צילום המסך האמיתי מהרצת התוכנה השנייה
+        if: github.event_name == 'workflow_dispatch' || steps.latest_check.outputs.publish == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: צילום-מסך-אמיתי-של-התוכנה
+          path: release-verification
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id || github.event.workflow_run.id }}
+
+      - name: אימות קובץ צילום המסך לפני פרסום
+        if: github.event_name == 'workflow_dispatch' || steps.latest_check.outputs.publish == 'true'
+        shell: bash
+        run: |
+          screenshot="release-verification/recipe-library-real-ui.png"
+          if [ ! -s "$screenshot" ]; then
+            echo "צילום מסך אמיתי לא נמצא; הפרסום נעצר."
+            find release-verification -maxdepth 2 -type f -print || true
+            exit 1
+          fi
+          size="$(wc -c < "$screenshot")"
+          if [ "$size" -lt 100000 ]; then
+            echo "קובץ צילום המסך קטן מדי: $size bytes"
+            exit 1
+          fi
+          echo "Screenshot verification passed: $size bytes."
+
       - name: הורדת החבילה המלאה מהרצת הבנייה
         if: github.event_name == 'workflow_dispatch' || steps.latest_check.outputs.publish == 'true'
         uses: actions/download-artifact@v4
