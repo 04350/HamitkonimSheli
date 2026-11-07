@@ -25,6 +25,7 @@ from html.parser import HTMLParser
 import tkinter as tk
 import threading
 import queue
+import math
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
 from recipe_center import RecipeCenter, recipe_search_text, compile_shopping_list, build_recipe_book_docx, export_recipe_book_pdf, parse_recipe_text, is_recipe_record, recipe_missing_parts
@@ -52,14 +53,192 @@ except Exception:
 try:
     from PIL import Image, ImageTk, ExifTags, ImageOps
 except Exception:
-    Image = ImageTk = ExifTags = None
+    Image = ImageTk = ExifTags = ImageOps = None
 try:
     import pytesseract
 except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.0"
+def _rounded_points(x1, y1, x2, y2, radius=14, steps=8):
+    """Create a polygon outline with smooth rounded corners."""
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    radius = max(0, min(radius, width / 2, height / 2))
+    if radius <= 0:
+        return [x1, y1, x2, y1, x2, y2, x1, y2]
+    points = []
+    corners = [
+        (x1 + radius, y1 + radius, 180, 270),
+        (x2 - radius, y1 + radius, 270, 360),
+        (x2 - radius, y2 - radius, 0, 90),
+        (x1 + radius, y2 - radius, 90, 180),
+    ]
+    for cx, cy, start, end in corners:
+        for step in range(steps + 1):
+            angle = math.radians(start + (end - start) * step / steps)
+            points.extend((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+    return points
+
+
+class ModernButton(tk.Canvas):
+    """A lightweight rounded button drawn on a canvas rather than a native Windows rectangle."""
+    def __init__(
+        self, parent, text, command=None, *, width=128, height=42,
+        bg="#E7EEE7", fg="#294238", hover_bg="#DDE8DD",
+        active_bg="#345646", active_fg="#FFFFFF", radius=13,
+        font=("Segoe UI", 10, "bold"), align="center",
+        canvas_bg=None, disabled=False, padx=15,
+    ):
+        self.label_text = str(text)
+        self.command = command
+        self.fill = bg
+        self.foreground = fg
+        self.hover_fill = hover_bg or bg
+        self.pressed_fill = active_bg or bg
+        self.active_foreground = active_fg
+        self.radius = radius
+        self.font_spec = font
+        self.align = align
+        self.disabled = bool(disabled)
+        self.hovered = False
+        self.pressed = False
+        self.selected = False
+        self.padx = padx
+        super().__init__(
+            parent, width=width, height=height,
+            bg=canvas_bg or parent.cget("background"),
+            highlightthickness=0, bd=0, relief="flat",
+            cursor="arrow" if disabled else "hand2",
+        )
+        self.bind("<Configure>", self._draw)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self._draw()
+
+    def _on_enter(self, _event=None):
+        if not self.disabled:
+            self.hovered = True
+            self._draw()
+
+    def _on_leave(self, _event=None):
+        self.hovered = False
+        self.pressed = False
+        self._draw()
+
+    def _on_press(self, _event=None):
+        if not self.disabled:
+            self.pressed = True
+            self._draw()
+
+    def _on_release(self, event=None):
+        was_pressed = self.pressed
+        self.pressed = False
+        self._draw()
+        if was_pressed and not self.disabled and self.command:
+            width, height = max(1, self.winfo_width()), max(1, self.winfo_height())
+            if event is None or (0 <= event.x <= width and 0 <= event.y <= height):
+                self.command()
+
+    def set_active(self, active=True):
+        self.selected = bool(active)
+        self._draw()
+
+    def set_text(self, text):
+        self.label_text = str(text)
+        self._draw()
+
+    def set_disabled(self, disabled=True):
+        self.disabled = bool(disabled)
+        self.configure(cursor="arrow" if self.disabled else "hand2")
+        self._draw()
+
+    def _draw(self, _event=None):
+        self.delete("all")
+        width, height = max(2, self.winfo_width()), max(2, self.winfo_height())
+        fill, foreground = self.fill, self.foreground
+        if self.disabled:
+            fill, foreground = "#ECEFEA", "#A1AAA2"
+        elif self.selected or self.pressed:
+            fill, foreground = self.pressed_fill, self.active_foreground
+        elif self.hovered:
+            fill = self.hover_fill
+        self.create_polygon(
+            *_rounded_points(1, 1, width - 1, height - 1, self.radius),
+            fill=fill, outline=fill, width=1, smooth=True, splinesteps=18
+        )
+        if self.align == "right":
+            x, anchor = width - self.padx, "e"
+        elif self.align == "left":
+            x, anchor = self.padx, "w"
+        else:
+            x, anchor = width / 2, "center"
+        self.create_text(
+            x, height / 2, text=self.label_text, fill=foreground,
+            font=self.font_spec, anchor=anchor, justify="right",
+            tags=("button-label",)
+        )
+
+
+class RoundedPanel(tk.Canvas):
+    """Canvas-backed rounded surface with a soft shadow and a normal Tk frame inside."""
+    def __init__(
+        self, parent, *, surface="#FFFFFF", background="#F5F1E9",
+        outline="#E7E8E1", shadow="#E9E6DD", radius=20, padding=2,
+        width=300, height=220, show_shadow=True,
+    ):
+        self.surface_color = surface
+        self.outline_color = outline
+        self.shadow_color = shadow
+        self.radius = radius
+        self.inner_padding = padding
+        self.show_shadow = show_shadow
+        super().__init__(
+            parent, width=width, height=height, bg=background,
+            highlightthickness=0, bd=0, relief="flat"
+        )
+        self.content = tk.Frame(self, bg=surface, bd=0, highlightthickness=0)
+        self.window_id = self.create_window(
+            padding + 1, padding + 1, anchor="nw", window=self.content
+        )
+        self.bind("<Configure>", self._resize)
+        self._draw()
+
+    def _resize(self, event=None):
+        width = max(4, event.width if event else self.winfo_width())
+        height = max(4, event.height if event else self.winfo_height())
+        pad = self.inner_padding + 1
+        self.itemconfigure(
+            self.window_id,
+            width=max(1, width - pad * 2),
+            height=max(1, height - pad * 2),
+        )
+        self._draw(event)
+
+    def _draw(self, event=None):
+        self.delete("panel-shape")
+        width = max(4, event.width if event else self.winfo_width())
+        height = max(4, event.height if event else self.winfo_height())
+        if self.show_shadow:
+            self.create_polygon(
+                *_rounded_points(3, 4, width - 2, height - 1, self.radius),
+                fill=self.shadow_color, outline=self.shadow_color,
+                tags=("panel-shape",), smooth=True, splinesteps=18
+            )
+        self.create_polygon(
+            *_rounded_points(1, 1, width - 4, height - 4, self.radius),
+            fill=self.surface_color, outline=self.outline_color,
+            width=1, tags=("panel-shape",), smooth=True, splinesteps=18
+        )
+        self.tag_lower("panel-shape")
+
+    def set_outline(self, color):
+        self.outline_color = color
+        self._draw()
+
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 TEXT_TYPES = {".txt", ".md", ".csv", ".tsv", ".log"}
 WORD_TYPES = {".doc", ".docx", ".docm", ".odt", ".rtf"}
@@ -1157,33 +1336,74 @@ class App:
         self.root.after(2500, self._maybe_auto_backup)
 
     def _apply_styles(self):
-        """Apply a modern, high-contrast desktop theme."""
+        """Premium warm cookbook theme with consistent hierarchy and calm surfaces."""
         theme = self.library.get_setting("color_theme", "שמנת")
         palettes = {
-            "שמנת": ("#F5F1E9", "#FFFFFF", "#293B32", "#344E40", "#26372F", "#78847B", "#E5DED2", "#B9774E", "#9E633E", "#FBF8F2", "#F4E6DA", "#B84E52"),
-            "מרווה": ("#EEF3ED", "#FFFFFF", "#294238", "#365646", "#293B31", "#718177", "#DCE5DB", "#77977D", "#617E66", "#F7FAF6", "#E5EEE4", "#B84E52"),
-            "לילה": ("#17201C", "#222D27", "#EAF0E9", "#1D2A23", "#EAF0E9", "#A5B1A7", "#39473E", "#A5C18F", "#89A978", "#26332C", "#35493B", "#E18D8D"),
-            "כחול": ("#EEF3F9", "#FFFFFF", "#172A45", "#10243D", "#25364D", "#718198", "#DCE5EF", "#087E8B", "#066571", "#F5F8FC", "#DCEFF2", "#B83E4B"),
-            "ירוק": ("#EFF6F3", "#FFFFFF", "#173E35", "#12362F", "#25443D", "#72877F", "#D8E7E0", "#16846D", "#116B58", "#F4F9F6", "#DDEFE7", "#B83E4B"),
-            "סגול": ("#F3F0F8", "#FFFFFF", "#33274D", "#261C3C", "#3D3450", "#80758F", "#E2DCEC", "#7655A6", "#61438D", "#F8F6FB", "#EAE2F5", "#B83E4B"),
+            "שמנת": {
+                "background": "#F4F1E9", "surface": "#FFFFFF", "navy": "#263D32",
+                "hero": "#20392F", "text": "#304238", "muted": "#89938B",
+                "border": "#E9E6DE", "accent": "#B97853", "accent_hover": "#A96543",
+                "row_alt": "#F8F7F2", "selected": "#E9F0E8", "danger": "#B44F52",
+                "sidebar": "#1E352B", "sidebar_active": "#355747",
+                "cover": "#E9E7DC", "shadow": "#E8E4DA", "soft": "#EDF2EA",
+                "pill": "#EEF3EC", "pill_text": "#48654F", "sidebar_text": "#DCE6DC",
+            },
+            "מרווה": {
+                "background": "#EEF2EC", "surface": "#FFFFFF", "navy": "#294238",
+                "hero": "#29483A", "text": "#30463B", "muted": "#7D8A80",
+                "border": "#DDE6DC", "accent": "#7B987C", "accent_hover": "#668468",
+                "row_alt": "#F6F9F4", "selected": "#E5EEE4", "danger": "#B44F52",
+                "sidebar": "#203A30", "sidebar_active": "#3A5B47",
+                "cover": "#DDE9DD", "shadow": "#E0E9DF", "soft": "#E7EFE5",
+                "pill": "#EAF1E8", "pill_text": "#49694F", "sidebar_text": "#DCE7DC",
+            },
+            "לילה": {
+                "background": "#151F1A", "surface": "#202D25", "navy": "#E7EFE7",
+                "hero": "#17241D", "text": "#E2EAE1", "muted": "#A0ADA2",
+                "border": "#3A4B40", "accent": "#B99170", "accent_hover": "#CAA27F",
+                "row_alt": "#29372E", "selected": "#33483A", "danger": "#E18D8D",
+                "sidebar": "#101A15", "sidebar_active": "#354E3E",
+                "cover": "#314237", "shadow": "#0F1712", "soft": "#2A3A30",
+                "pill": "#304337", "pill_text": "#D6E4D5", "sidebar_text": "#D5E1D6",
+            },
+            "כחול": {
+                "background": "#F0F3F7", "surface": "#FFFFFF", "navy": "#23364D",
+                "hero": "#1C3048", "text": "#304157", "muted": "#8390A0",
+                "border": "#E1E7ED", "accent": "#318B91", "accent_hover": "#26767C",
+                "row_alt": "#F7F9FB", "selected": "#E4EFF0", "danger": "#B83E4B",
+                "sidebar": "#1D3348", "sidebar_active": "#35566B",
+                "cover": "#E2EBEF", "shadow": "#E2E8EE", "soft": "#EAF1F2",
+                "pill": "#E8F1F2", "pill_text": "#3A6F72", "sidebar_text": "#DCE6ED",
+            },
+            "ירוק": {
+                "background": "#EEF4F1", "surface": "#FFFFFF", "navy": "#1E4238",
+                "hero": "#153A30", "text": "#2C463D", "muted": "#7E9087",
+                "border": "#DDE9E2", "accent": "#16846D", "accent_hover": "#116B58",
+                "row_alt": "#F5F9F6", "selected": "#E0EFE7", "danger": "#B83E4B",
+                "sidebar": "#173C32", "sidebar_active": "#2B5949",
+                "cover": "#DDEDE4", "shadow": "#DFEAE3", "soft": "#E4F0E8",
+                "pill": "#E1F0E8", "pill_text": "#27745F", "sidebar_text": "#D9E8DF",
+            },
+            "סגול": {
+                "background": "#F3F0F7", "surface": "#FFFFFF", "navy": "#3C3153",
+                "hero": "#302542", "text": "#443A54", "muted": "#8A8196",
+                "border": "#E6E0EC", "accent": "#8063A6", "accent_hover": "#684D8D",
+                "sidebar": "#302542", "sidebar_active": "#50406A",
+                "cover": "#EAE3F1", "shadow": "#E7E0EC", "soft": "#EEE8F4",
+                "pill": "#EEE8F4", "pill_text": "#6E568C", "row_alt": "#F9F7FB",
+                "selected": "#EEE8F4", "danger": "#B83E4B", "sidebar_text": "#E8E1EF",
+            },
         }
-        values = palettes.get(theme, palettes["כחול"])
-        names = ("background", "surface", "navy", "hero", "text", "muted", "border", "accent", "accent_hover", "row_alt", "selected", "danger")
-        self.colors = dict(zip(names, values))
-        self.colors.update({
-            "sidebar": "#20372D" if theme != "לילה" else "#101814",
-            "sidebar_active": "#355644" if theme != "לילה" else "#344C3B",
-            "cover": "#E9E1D3" if theme == "שמנת" else ("#DDE9DD" if theme == "מרווה" else "#2D3C33"),
-        })
+        self.colors = dict(palettes.get(theme, palettes["שמנת"]))
         try:
-            font_size = max(8, min(15, int(self.library.get_setting("font_size", "10"))))
-        except ValueError:
+            font_size = max(9, min(15, int(self.library.get_setting("font_size", "10"))))
+        except (ValueError, TypeError):
             font_size = 10
+
         try:
             self.style.theme_use("clam")
         except Exception:
             pass
-
         c = self.colors
         self.root.configure(background=c["background"])
         self.style.configure(".", font=("Segoe UI", font_size), foreground=c["text"])
@@ -1193,25 +1413,16 @@ class App:
         self.style.configure("Panel.TLabel", background=c["surface"], foreground=c["text"])
         self.style.configure("Muted.TLabel", background=c["surface"], foreground=c["muted"], font=("Segoe UI", 9))
         self.style.configure("Section.TLabel", background=c["surface"], foreground=c["navy"], font=("Segoe UI", 14, "bold"))
-        self.style.configure("Status.TLabel", background=c["surface"], foreground=c["muted"], padding=(12, 8), font=("Segoe UI", 9))
-
+        self.style.configure("Status.TLabel", background=c["background"], foreground=c["muted"], padding=(10, 7), font=("Segoe UI", 9))
         self.style.configure(
-            "Card.TLabelframe", background=c["surface"],
-            bordercolor=c["border"], borderwidth=1, relief="solid", padding=14
-        )
-        self.style.configure(
-            "Card.TLabelframe.Label", background=c["surface"],
-            foreground=c["navy"], font=("Segoe UI", 12, "bold")
-        )
-        self.style.configure(
-            "TButton", font=("Segoe UI", max(8, font_size - 1), "bold"), padding=(14, 10),
-            background="#E8EEF5", foreground=c["navy"],
+            "TButton", font=("Segoe UI", max(9, font_size - 1), "bold"),
+            padding=(15, 10), background=c["soft"], foreground=c["navy"],
             bordercolor=c["border"], focuscolor=c["accent"], relief="flat"
         )
         self.style.map(
             "TButton",
-            background=[("disabled", "#EEF2F6"), ("pressed", "#D7E2EC"), ("active", "#DCE7F0")],
-            foreground=[("disabled", "#9AA7B5"), ("active", c["navy"])]
+            background=[("disabled", c["row_alt"]), ("pressed", c["selected"]), ("active", c["selected"])],
+            foreground=[("disabled", c["muted"]), ("active", c["navy"])]
         )
         self.style.configure(
             "Primary.TButton", background=c["accent"], foreground="#FFFFFF",
@@ -1219,7 +1430,7 @@ class App:
         )
         self.style.map(
             "Primary.TButton",
-            background=[("disabled", "#A8C7C7"), ("pressed", c["accent_hover"]), ("active", c["accent_hover"])],
+            background=[("disabled", c["muted"]), ("pressed", c["accent_hover"]), ("active", c["accent_hover"])],
             foreground=[("disabled", "#F5FAFA"), ("!disabled", "#FFFFFF")]
         )
         self.style.configure(
@@ -1228,126 +1439,173 @@ class App:
         )
         self.style.map("Danger.TButton", background=[("pressed", "#F4D9DD"), ("active", "#F8E4E7")])
         self.style.configure(
-            "TEntry", fieldbackground=c["surface"], foreground=c["navy"],
-            padding=(12, 11), bordercolor=c["border"], insertcolor=c["navy"],
-            font=("Segoe UI", 11)
+            "TEntry", fieldbackground=c["row_alt"], foreground=c["navy"],
+            padding=(13, 11), bordercolor=c["border"], insertcolor=c["navy"],
+            font=("Segoe UI", 11), relief="flat"
         )
         self.style.configure(
-            "Treeview", rowheight=42, font=("Segoe UI", 10),
+            "TCombobox", fieldbackground=c["row_alt"], background=c["surface"],
+            foreground=c["navy"], arrowcolor=c["muted"],
+            padding=(10, 9), bordercolor=c["border"], relief="flat"
+        )
+        self.style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", c["row_alt"])],
+            selectbackground=[("readonly", c["row_alt"])],
+            selectforeground=[("readonly", c["navy"])],
+            foreground=[("readonly", c["navy"])]
+        )
+        self.style.configure(
+            "Treeview", rowheight=44, font=("Segoe UI", 10),
             background=c["surface"], fieldbackground=c["surface"],
             foreground=c["text"], bordercolor=c["border"], borderwidth=0
         )
         self.style.configure(
             "Treeview.Heading", font=("Segoe UI", 9, "bold"),
-            background="#EDF2F8", foreground=c["navy"],
-            padding=(12, 13), relief="flat"
+            background=c["row_alt"], foreground=c["muted"],
+            padding=(13, 12), relief="flat"
         )
-        self.style.map(
-            "Treeview", background=[("selected", c["selected"])],
-            foreground=[("selected", c["navy"])]
-        )
-        self.style.map("Treeview.Heading", background=[("active", "#DFE9F2")])
+        self.style.map("Treeview", background=[("selected", c["selected"])], foreground=[("selected", c["navy"])])
+        self.style.map("Treeview.Heading", background=[("active", c["soft"])])
         self.style.configure(
-            "Vertical.TScrollbar", background="#DDE6EF",
-            troughcolor=c["background"], bordercolor=c["background"], arrowsize=15
+            "Vertical.TScrollbar", background=c["border"],
+            troughcolor=c["background"], bordercolor=c["background"], arrowsize=14
         )
+
 
     def _build(self):
-        """Build the recipe-first workspace with compact RTL navigation."""
-        self.shell = tk.Frame(self.root, bg=self.colors["background"], bd=0)
+        """Modern, airy recipe-first home with rounded surfaces and quiet navigation."""
+        c = self.colors
+        self.shell = tk.Frame(self.root, bg=c["background"], bd=0)
         self.shell.pack(fill="both", expand=True)
 
-        sidebar = tk.Frame(self.shell, bg=self.colors["sidebar"], width=218, bd=0)
+        sidebar = tk.Frame(self.shell, bg=c["sidebar"], width=226, bd=0)
         sidebar.pack(side="right", fill="y")
         sidebar.pack_propagate(False)
-        brand = tk.Frame(sidebar, bg=self.colors["sidebar"], padx=18, pady=24)
+
+        brand = tk.Frame(sidebar, bg=c["sidebar"], padx=22, pady=24)
         brand.pack(fill="x")
-        tk.Label(brand, text="✦", bg=self.colors["sidebar"], fg="#E3B78E",
-                 font=("Segoe UI Symbol", 24, "bold"), anchor="e").pack(fill="x")
-        tk.Label(brand, text="ספריית המתכונים", bg=self.colors["sidebar"], fg="#FFFFFF",
-                 font=("Segoe UI", 15, "bold"), anchor="e").pack(fill="x", pady=(5, 1))
-        tk.Label(brand, text=f"גרסה {APP_VERSION}", bg=self.colors["sidebar"], fg="#B5C5BA",
-                 font=("Segoe UI", 9), anchor="e").pack(fill="x")
-        tk.Frame(sidebar, bg="#496353", height=1).pack(fill="x", padx=18, pady=(2, 12))
+        mark = tk.Canvas(brand, width=48, height=48, bg=c["sidebar"], highlightthickness=0, bd=0)
+        mark.pack(anchor="e")
+        mark.create_polygon(*_rounded_points(2, 2, 46, 46, 14), fill=c["accent"], outline=c["accent"])
+        mark.create_text(24, 24, text="מ", fill="#FFFFFF", font=("Segoe UI", 19, "bold"))
+        tk.Label(
+            brand, text="ספריית המתכונים", bg=c["sidebar"], fg="#FFFFFF",
+            font=("Segoe UI", 15, "bold"), anchor="e"
+        ).pack(fill="x", pady=(12, 2))
+        tk.Label(
+            brand, text="כל הטעמים שלך, במקום אחד", bg=c["sidebar"],
+            fg="#B8C8BC", font=("Segoe UI", 9), anchor="e"
+        ).pack(fill="x")
+        tk.Frame(sidebar, bg="#3C5748", height=1).pack(fill="x", padx=20, pady=(3, 18))
+
         self.nav_buttons = {}
+        tk.Label(sidebar, text="הספרייה", bg=c["sidebar"], fg="#91A99A",
+                 font=("Segoe UI", 9, "bold"), anchor="e", padx=22).pack(fill="x", pady=(0, 7))
         for key, glyph, label in [
             ("recipes", "▦", "המתכונים שלי"),
             ("favorites", "★", "מועדפים"),
             ("files", "▤", "כל הקבצים"),
         ]:
             self._add_nav_button(sidebar, key, glyph, label)
-        tk.Label(sidebar, text="כלים", bg=self.colors["sidebar"], fg="#9CB0A2",
-                 font=("Segoe UI", 9, "bold"), anchor="e", padx=22).pack(fill="x", pady=(22, 6))
+
+        tk.Label(sidebar, text="כלים", bg=c["sidebar"], fg="#91A99A",
+                 font=("Segoe UI", 9, "bold"), anchor="e", padx=22).pack(fill="x", pady=(25, 7))
         for key, glyph, label in [
-            ("scanner", "⌕", "סריקת מתכון חכמה"),
+            ("scanner", "⌕", "סריקה חכמה"),
             ("center", "◉", "מרכז המתכונים"),
             ("import", "＋", "הוספת קבצים"),
             ("folder", "▣", "ייבוא תיקייה"),
+        ]:
+            self._add_nav_button(sidebar, key, glyph, label)
+        tk.Frame(sidebar, bg="#3C5748", height=1).pack(fill="x", padx=20, pady=(18, 10))
+        for key, glyph, label in [
             ("backup", "↥", "גיבוי ושחזור"),
             ("recycle", "♻", "סל המחזור"),
             ("settings", "⚙", "הגדרות ועיצוב"),
         ]:
             self._add_nav_button(sidebar, key, glyph, label)
-        tk.Frame(sidebar, bg="#496353", height=1).pack(fill="x", padx=18, pady=(16, 10))
-        tk.Label(sidebar, text="עובדת מקומית\nהקבצים נשארים במחשב שלך",
-                 bg=self.colors["sidebar"], fg="#B5C5BA", font=("Segoe UI", 9),
-                 justify="right", anchor="e", padx=20).pack(side="bottom", fill="x", pady=20)
 
-        workspace = tk.Frame(self.shell, bg=self.colors["background"], padx=24, pady=20)
+        footer = tk.Frame(sidebar, bg=c["sidebar"], padx=20, pady=18)
+        footer.pack(side="bottom", fill="x")
+        tk.Label(
+            footer, text="●  עבודה מקומית ומאובטחת", bg=c["sidebar"],
+            fg="#B9C9BD", font=("Segoe UI", 8), anchor="e"
+        ).pack(fill="x")
+        tk.Label(
+            footer, text=f"גרסה {APP_VERSION}", bg=c["sidebar"],
+            fg="#81998A", font=("Segoe UI", 8), anchor="e"
+        ).pack(fill="x", pady=(4, 0))
+
+        workspace = tk.Frame(self.shell, bg=c["background"], padx=26, pady=23)
         workspace.pack(side="left", fill="both", expand=True)
-        header = tk.Frame(workspace, bg=self.colors["background"])
-        header.pack(fill="x", pady=(0, 14))
-        heading = tk.Frame(header, bg=self.colors["background"])
+        header = tk.Frame(workspace, bg=c["background"])
+        header.pack(fill="x", pady=(0, 17))
+        heading = tk.Frame(header, bg=c["background"])
         heading.pack(side="right", fill="x", expand=True)
         self.page_title_label = tk.Label(
-            heading, text="המתכונים שלי", bg=self.colors["background"],
-            fg=self.colors["navy"], font=("Segoe UI", 25, "bold"), anchor="e"
+            heading, text="המתכונים שלי", bg=c["background"], fg=c["navy"],
+            font=("Segoe UI", 27, "bold"), anchor="e"
         )
         self.page_title_label.pack(fill="x")
         self.page_subtitle_label = tk.Label(
-            heading, text="כל המתכונים שלך במקום אחד. בוחרים מתכון ומתחילים לקרוא.",
-            bg=self.colors["background"], fg=self.colors["muted"],
-            font=("Segoe UI", 10), anchor="e"
+            heading, text="אוסף הטעמים שלך — מסודר, זמין ומוכן לקריאה.",
+            bg=c["background"], fg=c["muted"], font=("Segoe UI", 10), anchor="e"
         )
-        self.page_subtitle_label.pack(fill="x", pady=(2, 0))
+        self.page_subtitle_label.pack(fill="x", pady=(5, 0))
+        self.count_badge = ModernButton(
+            header, text="הספרייה שלך", command=None, width=150, height=38,
+            bg=c["pill"], fg=c["pill_text"], hover_bg=c["pill"],
+            active_bg=c["pill"], radius=18, font=("Segoe UI", 9, "bold"),
+            canvas_bg=c["background"], disabled=True
+        )
+        self.count_badge.pack(side="left", padx=(0, 5))
         self.count_label = tk.Label(
-            header, text="", bg=self.colors["background"], fg=self.colors["muted"],
-            font=("Segoe UI", 10, "bold"), anchor="e"
+            header, text="", bg=c["background"], fg=c["muted"],
+            font=("Segoe UI", 9, "bold"), anchor="e"
         )
-        self.count_label.pack(side="left", padx=(12, 0))
+        self.count_label.pack(side="left", padx=(10, 0))
+        ModernButton(
+            header, text="＋  הוספת מתכון", command=self.add_files,
+            width=148, height=42, bg=c["accent"], fg="#FFFFFF",
+            hover_bg=c["accent_hover"], active_bg=c["accent_hover"],
+            radius=14, font=("Segoe UI", 9, "bold"), canvas_bg=c["background"]
+        ).pack(side="left", padx=(0, 12))
 
-        search_card = tk.Frame(
-            workspace, bg=self.colors["surface"],
-            highlightbackground=self.colors["border"], highlightthickness=1
+        search_shell = RoundedPanel(
+            workspace, surface=c["surface"], background=c["background"],
+            outline=c["border"], shadow=c["shadow"], radius=18,
+            padding=3, height=68, show_shadow=True
         )
-        search_card.pack(fill="x", pady=(0, 12))
-        search_inner = tk.Frame(search_card, bg=self.colors["surface"], padx=14, pady=11)
-        search_inner.pack(fill="x")
-        tk.Label(search_inner, text="⌕", bg=self.colors["surface"], fg=self.colors["accent"],
-                 font=("Segoe UI Symbol", 19), width=2).pack(side="right")
+        search_shell.pack(fill="x", pady=(0, 13))
+        search_inner = tk.Frame(search_shell.content, bg=c["surface"], padx=15, pady=10)
+        search_inner.pack(fill="both", expand=True)
+        tk.Label(
+            search_inner, text="⌕", bg=c["surface"], fg=c["accent"],
+            font=("Segoe UI Symbol", 22), width=2
+        ).pack(side="right")
         self.search_entry = ttk.Entry(search_inner, textvariable=self.search_value, justify="right")
-        self.search_entry.pack(side="right", fill="x", expand=True, ipady=3, padx=(4, 10))
+        self.search_entry.pack(side="right", fill="x", expand=True, ipady=3, padx=(5, 10))
         self.search_entry.bind("<KeyRelease>", lambda _event: self.refresh())
-        tk.Button(
+        ModernButton(
             search_inner, text="ניקוי", command=lambda: (self.search_value.set(""), self.refresh()),
-            bg=self.colors["row_alt"], fg=self.colors["navy"], activebackground=self.colors["selected"],
-            relief="flat", bd=0, padx=14, pady=7, cursor="hand2", font=("Segoe UI", 9)
-        ).pack(side="left")
+            width=76, height=38, bg=c["row_alt"], fg=c["muted"],
+            hover_bg=c["soft"], radius=12, font=("Segoe UI", 9, "bold"),
+            canvas_bg=c["surface"]
+        ).pack(side="left", padx=(2, 0))
 
-        filter_bar = tk.Frame(workspace, bg=self.colors["background"])
-        filter_bar.pack(fill="x", pady=(0, 12))
-        tk.Label(filter_bar, text="קטגוריה", bg=self.colors["background"], fg=self.colors["muted"],
-                 font=("Segoe UI", 9)).pack(side="right", padx=(0, 6))
+        filter_bar = tk.Frame(workspace, bg=c["background"])
+        filter_bar.pack(fill="x", pady=(0, 15))
+        tk.Label(filter_bar, text="סינון", bg=c["background"], fg=c["muted"],
+                 font=("Segoe UI", 9, "bold")).pack(side="right", padx=(0, 7))
         self.category_combo = ttk.Combobox(
             filter_bar, textvariable=self.category_filter_value,
-            state="readonly", width=20, justify="right"
+            state="readonly", width=19, justify="right"
         )
-        self.category_combo.pack(side="right", padx=(0, 14))
+        self.category_combo.pack(side="right", padx=(0, 9), ipady=2)
         self.category_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
-        tk.Label(filter_bar, text="מיון", bg=self.colors["background"], fg=self.colors["muted"],
-                 font=("Segoe UI", 9)).pack(side="right", padx=(0, 6))
         self.sort_combo = ttk.Combobox(
-            filter_bar, textvariable=self.sort_value, state="readonly", width=19,
+            filter_bar, textvariable=self.sort_value, state="readonly", width=18,
             justify="right", values=[
                 "תאריך: חדש לישן", "תאריך: ישן לחדש", "שם: א-ת", "שם: ת-א",
                 "דירוג: גבוה לנמוך", "נצפו לאחרונה", "סוג קובץ", "גודל: גדול לקטן"
@@ -1355,67 +1613,81 @@ class App:
         )
         self.sort_combo.pack(side="right")
         self.sort_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
-        self.view_all_button = tk.Button(
-            filter_bar, text="תצוגת רשימה  ☷", command=lambda: self._set_view("רשימה"),
-            bg=self.colors["row_alt"], fg=self.colors["navy"], activebackground=self.colors["selected"],
-            relief="flat", bd=0, padx=12, pady=7, cursor="hand2", font=("Segoe UI", 9)
-        )
-        self.view_all_button.pack(side="left")
-        self.view_grid_button = tk.Button(
-            filter_bar, text="תצוגת כרטיסים  ▦", command=lambda: self._set_view("גלריה"),
-            bg=self.colors["row_alt"], fg=self.colors["navy"], activebackground=self.colors["selected"],
-            relief="flat", bd=0, padx=12, pady=7, cursor="hand2", font=("Segoe UI", 9)
-        )
-        self.view_grid_button.pack(side="left", padx=(0, 6))
 
-        content_area = tk.Frame(workspace, bg=self.colors["background"])
-        content_area.pack(fill="both", expand=True)
-        self.reader_panel = tk.Frame(
-            content_area, bg=self.colors["surface"], width=320,
-            highlightbackground=self.colors["border"], highlightthickness=1
+        view_controls = tk.Frame(filter_bar, bg=c["background"])
+        view_controls.pack(side="left")
+        self.view_all_button = ModernButton(
+            view_controls, text="☷  רשימה", command=lambda: self._set_view("רשימה"),
+            width=104, height=36, bg=c["surface"], fg=c["muted"],
+            hover_bg=c["soft"], active_bg=c["sidebar_active"],
+            radius=12, font=("Segoe UI", 9, "bold"), canvas_bg=c["background"]
         )
-        self.reader_panel.pack(side="right", fill="y", padx=(14, 0))
-        self.reader_panel.pack_propagate(False)
-        reader_heading = tk.Frame(self.reader_panel, bg=self.colors["surface"], padx=16, pady=13)
+        self.view_all_button.pack(side="left", padx=(0, 5))
+        self.view_grid_button = ModernButton(
+            view_controls, text="▦  כרטיסים", command=lambda: self._set_view("גלריה"),
+            width=112, height=36, bg=c["surface"], fg=c["muted"],
+            hover_bg=c["soft"], active_bg=c["sidebar_active"],
+            radius=12, font=("Segoe UI", 9, "bold"), canvas_bg=c["background"]
+        )
+        self.view_grid_button.pack(side="left")
+
+        content_area = tk.Frame(workspace, bg=c["background"])
+        content_area.pack(fill="both", expand=True)
+        reader_shell = RoundedPanel(
+            content_area, surface=c["surface"], background=c["background"],
+            outline=c["border"], shadow=c["shadow"], radius=21,
+            padding=2, width=328, show_shadow=True
+        )
+        reader_shell.pack(side="right", fill="y", padx=(14, 0))
+        self.reader_panel = reader_shell.content
+        reader_heading = tk.Frame(self.reader_panel, bg=c["surface"], padx=17, pady=15)
         reader_heading.pack(fill="x")
-        tk.Label(reader_heading, text="קריאת המתכון", bg=self.colors["surface"],
-                 fg=self.colors["navy"], font=("Segoe UI", 14, "bold"), anchor="e").pack(fill="x")
-        tk.Label(reader_heading, text="בחרו כרטיס כדי להציג את הפרטים כאן",
-                 bg=self.colors["surface"], fg=self.colors["muted"],
-                 font=("Segoe UI", 9), anchor="e").pack(fill="x", pady=(2, 0))
-        reader_canvas_frame = tk.Frame(self.reader_panel, bg=self.colors["surface"])
-        reader_canvas_frame.pack(fill="both", expand=True, padx=(8, 4), pady=(0, 8))
-        self.reader_canvas = tk.Canvas(reader_canvas_frame, bg=self.colors["surface"], highlightthickness=0, bd=0)
+        tk.Label(
+            reader_heading, text="המתכון הנבחר", bg=c["surface"],
+            fg=c["navy"], font=("Segoe UI", 14, "bold"), anchor="e"
+        ).pack(fill="x")
+        tk.Label(
+            reader_heading, text="המצרכים ואופן ההכנה, בלי לעזוב את הספרייה",
+            bg=c["surface"], fg=c["muted"], font=("Segoe UI", 8), anchor="e"
+        ).pack(fill="x", pady=(3, 0))
+        tk.Frame(self.reader_panel, bg=c["border"], height=1).pack(fill="x", padx=16, pady=(0, 4))
+
+        reader_canvas_frame = tk.Frame(self.reader_panel, bg=c["surface"])
+        reader_canvas_frame.pack(fill="both", expand=True, padx=(7, 4), pady=(0, 8))
+        self.reader_canvas = tk.Canvas(reader_canvas_frame, bg=c["surface"], highlightthickness=0, bd=0)
         reader_scroll = ttk.Scrollbar(reader_canvas_frame, orient="vertical", command=self.reader_canvas.yview)
         self.reader_canvas.configure(yscrollcommand=reader_scroll.set)
         reader_scroll.pack(side="left", fill="y")
         self.reader_canvas.pack(side="right", fill="both", expand=True)
-        self.reader_inner = tk.Frame(self.reader_canvas, bg=self.colors["surface"])
+        self.reader_inner = tk.Frame(self.reader_canvas, bg=c["surface"])
         self.reader_window = self.reader_canvas.create_window((0, 0), window=self.reader_inner, anchor="nw")
         self.reader_inner.bind("<Configure>", lambda _event: self.reader_canvas.configure(scrollregion=self.reader_canvas.bbox("all")))
         self.reader_canvas.bind("<Configure>", lambda event: self.reader_canvas.itemconfigure(self.reader_window, width=event.width))
 
-        catalog = tk.Frame(
-            content_area, bg=self.colors["surface"],
-            highlightbackground=self.colors["border"], highlightthickness=1
+        catalog_shell = RoundedPanel(
+            content_area, surface=c["surface"], background=c["background"],
+            outline=c["border"], shadow=c["shadow"], radius=21,
+            padding=2, show_shadow=True
         )
-        catalog.pack(side="left", fill="both", expand=True)
-        catalog_header = tk.Frame(catalog, bg=self.colors["surface"], padx=16, pady=13)
+        catalog_shell.pack(side="left", fill="both", expand=True)
+        catalog = catalog_shell.content
+        catalog_header = tk.Frame(catalog, bg=c["surface"], padx=20, pady=16)
         catalog_header.pack(fill="x")
         self.catalog_title = tk.Label(
-            catalog_header, text="כל המתכונים", bg=self.colors["surface"],
-            fg=self.colors["navy"], font=("Segoe UI", 14, "bold"), anchor="e"
+            catalog_header, text="כל המתכונים", bg=c["surface"],
+            fg=c["navy"], font=("Segoe UI", 15, "bold"), anchor="e"
         )
         self.catalog_title.pack(side="right")
         self.catalog_hint = tk.Label(
-            catalog_header, text="לחצו על מתכון כדי לקרוא אותו",
-            bg=self.colors["surface"], fg=self.colors["muted"], font=("Segoe UI", 9), anchor="w"
+            catalog_header, text="בחרו מתכון כדי לפתוח אותו לקריאה",
+            bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9), anchor="w"
         )
         self.catalog_hint.pack(side="left")
-        catalog_body = tk.Frame(catalog, bg=self.colors["surface"])
-        catalog_body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        tk.Frame(catalog, bg=c["border"], height=1).pack(fill="x", padx=17)
+        catalog_body = tk.Frame(catalog, bg=c["surface"])
+        catalog_body.pack(fill="both", expand=True, padx=11, pady=(7, 12))
 
-        self.list_container = tk.Frame(catalog_body, bg=self.colors["surface"])
+        self.list_container = tk.Frame(catalog_body, bg=c["surface"])
         columns = ("favorite", "date", "kind", "size", "title")
         self.tree = ttk.Treeview(self.list_container, columns=columns, show="headings", selectmode="extended")
         self.tree.heading("favorite", text="★", anchor="center")
@@ -1430,65 +1702,70 @@ class App:
         self.tree.column("title", width=340, minwidth=190, anchor="e", stretch=True)
         scroll = ttk.Scrollbar(self.list_container, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.tag_configure("even", background=self.colors["surface"])
-        self.tree.tag_configure("odd", background=self.colors["row_alt"])
+        self.tree.tag_configure("even", background=c["surface"])
+        self.tree.tag_configure("odd", background=c["row_alt"])
         self.tree.pack(side="right", fill="both", expand=True)
         scroll.pack(side="left", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self.show_selected)
         self.tree.bind("<Double-1>", lambda _event: self.open_selected())
 
-        self.gallery_container = tk.Frame(catalog_body, bg=self.colors["surface"])
-        self.gallery_canvas = tk.Canvas(self.gallery_container, background=self.colors["surface"], highlightthickness=0, bd=0)
+        self.gallery_container = tk.Frame(catalog_body, bg=c["surface"])
+        self.gallery_canvas = tk.Canvas(self.gallery_container, background=c["surface"], highlightthickness=0, bd=0)
         gallery_scroll = ttk.Scrollbar(self.gallery_container, orient="vertical", command=self.gallery_canvas.yview)
         self.gallery_canvas.configure(yscrollcommand=gallery_scroll.set)
         gallery_scroll.pack(side="left", fill="y")
         self.gallery_canvas.pack(side="right", fill="both", expand=True)
-        self.gallery_inner = tk.Frame(self.gallery_canvas, bg=self.colors["surface"])
+        self.gallery_inner = tk.Frame(self.gallery_canvas, bg=c["surface"])
         self.gallery_window = self.gallery_canvas.create_window((0, 0), window=self.gallery_inner, anchor="nw")
         self.gallery_inner.bind("<Configure>", lambda _event: self.gallery_canvas.configure(scrollregion=self.gallery_canvas.bbox("all")))
         self.gallery_canvas.bind("<Configure>", lambda event: self.gallery_canvas.itemconfigure(self.gallery_window, width=event.width))
         self.gallery_canvas.bind("<MouseWheel>", lambda event: self.gallery_canvas.yview_scroll(int(-event.delta / 120), "units"))
         self.gallery_container.pack(fill="both", expand=True)
 
+        # Compatibility controls used by legacy filters and preview commands.
         self._compat_frame = tk.Frame(self.root)
         self.filter_combo = ttk.Combobox(self._compat_frame, textvariable=self.filter_value)
         self.tag_combo = ttk.Combobox(self._compat_frame, textvariable=self.tag_filter_value)
         self.folder_combo = ttk.Combobox(self._compat_frame, textvariable=self.folder_filter_value)
         self.preview_image = tk.Canvas(self._compat_frame, width=1, height=1)
         self.detail_label = ttk.Label(self._compat_frame)
-        self.status_frame = tk.Frame(workspace, bg=self.colors["background"])
+        self.status_frame = tk.Frame(workspace, bg=c["background"])
         self.status_frame.pack(fill="x", pady=(8, 0))
         self.status_label = tk.Label(
-            self.status_frame, textvariable=self.status_value, bg=self.colors["background"],
-            fg=self.colors["muted"], font=("Segoe UI", 9), anchor="e"
+            self.status_frame, textvariable=self.status_value,
+            bg=c["background"], fg=c["muted"], font=("Segoe UI", 8), anchor="e"
         )
         self.status_label.pack(fill="x")
         self._update_navigation_active()
+        self._update_view_buttons()
         self._render_reader(None)
 
     def _add_nav_button(self, parent, key, glyph, label):
-        button = tk.Button(
-            parent, text=f"{glyph}    {label}", anchor="e", justify="right",
+        button = ModernButton(
+            parent, text=f"{glyph}    {label}",
             command=lambda value=key: self._navigate(value),
-            bg=self.colors["sidebar"], fg="#E6EEE8",
-            activebackground=self.colors["sidebar_active"], activeforeground="#FFFFFF",
-            relief="flat", bd=0, padx=20, pady=11, cursor="hand2",
-            font=("Segoe UI", 10, "bold")
+            width=190, height=43, bg=self.colors["sidebar"],
+            fg=self.colors["sidebar_text"], hover_bg=self.colors["sidebar_active"],
+            active_bg=self.colors["sidebar_active"], active_fg="#FFFFFF",
+            radius=12, font=("Segoe UI", 10, "bold"), align="right",
+            canvas_bg=self.colors["sidebar"], padx=18
         )
-        button.pack(fill="x", padx=10, pady=2)
+        button.pack(fill="x", padx=12, pady=3)
         self.nav_buttons[key] = button
 
     def _update_navigation_active(self):
         active = getattr(self, "current_page", "recipes")
         for key, button in getattr(self, "nav_buttons", {}).items():
             try:
-                selected = key == active
-                button.configure(
-                    bg=self.colors["sidebar_active"] if selected else self.colors["sidebar"],
-                    fg="#FFFFFF" if selected else "#D7E2D9"
-                )
-            except tk.TclError:
+                button.set_active(key == active)
+            except (tk.TclError, AttributeError):
                 pass
+
+    def _update_view_buttons(self):
+        if not hasattr(self, "view_all_button"):
+            return
+        self.view_all_button.set_active(self.view_mode.get() == "רשימה")
+        self.view_grid_button.set_active(self.view_mode.get() == "גלריה")
 
     def _navigate(self, key):
         if key == "scanner":
@@ -1518,13 +1795,13 @@ class App:
             self.filter_value.set("כל הקבצים")
             self.recipe_filter_value.set("מתכונים בלבד")
             self.page_title_label.configure(text="המתכונים שלי")
-            self.page_subtitle_label.configure(text="כל המתכונים שלך במקום אחד. בוחרים מתכון ומתחילים לקרוא.")
+            self.page_subtitle_label.configure(text="אוסף הטעמים שלך — מסודר, זמין ומוכן לקריאה.")
             self.catalog_title.configure(text="כל המתכונים")
         elif key == "favorites":
             self.filter_value.set("★ מועדפים")
             self.recipe_filter_value.set("מתכונים בלבד")
-            self.page_title_label.configure(text="המתכונים שאהבתי")
-            self.page_subtitle_label.configure(text="המתכונים שסימנת כמועדפים, תמיד בהישג יד.")
+            self.page_title_label.configure(text="המועדפים שלי")
+            self.page_subtitle_label.configure(text="המתכונים ששמרת קרוב ללב, תמיד בהישג יד.")
             self.catalog_title.configure(text="מועדפים")
         elif key == "files":
             self.filter_value.set("כל הקבצים")
@@ -1559,6 +1836,7 @@ class App:
         """Switch between list and gallery views and remember the choice."""
         mode = self.view_mode.get()
         self.library.set_setting("view_mode", mode)
+        self._update_view_buttons()
         if mode == "גלריה":
             self.list_container.pack_forget()
             self.gallery_container.pack(fill="both", expand=True)
@@ -1583,7 +1861,10 @@ class App:
         for item_id, card in getattr(self, "gallery_cards", {}).items():
             selected = str(item_id) == str(self.selected_item_id)
             try:
-                card.configure(highlightbackground=self.colors["accent"] if selected else self.colors["border"], highlightthickness=3 if selected else 1)
+                if isinstance(card, RoundedPanel):
+                    card.set_outline(self.colors["accent"] if selected else self.colors["border"])
+                else:
+                    card.configure(highlightbackground=self.colors["accent"] if selected else self.colors["border"], highlightthickness=3 if selected else 1)
             except tk.TclError:
                 pass
 
@@ -1592,72 +1873,117 @@ class App:
             child.destroy()
         self.gallery_photos = []
         self.gallery_cards = {}
+        self._gallery_ranked = ranked
         try:
             available_width = max(1, self.gallery_canvas.winfo_width())
         except tk.TclError:
             available_width = 900
-        columns = 3 if available_width >= 820 else 2
+        columns = 3 if available_width >= 840 else 2
         for column in range(columns):
             self.gallery_inner.grid_columnconfigure(column, weight=1, uniform="recipe-cards")
+
         if not ranked:
-            empty = tk.Frame(self.gallery_inner, bg=self.colors["surface"], padx=20, pady=42)
-            empty.grid(row=0, column=0, columnspan=columns, sticky="nsew", padx=18, pady=18)
-            tk.Label(empty, text="🍲", bg=self.colors["surface"], fg=self.colors["accent"],
-                     font=("Segoe UI Emoji", 42)).pack()
-            tk.Label(empty, text="עדיין אין מתכונים להצגה", bg=self.colors["surface"],
-                     fg=self.colors["navy"], font=("Segoe UI", 16, "bold")).pack(pady=(10, 4))
-            tk.Label(empty, text="אפשר להוסיף תמונות, סריקות או קובצי מתכונים. הם יופיעו כאן.",
-                     bg=self.colors["surface"], fg=self.colors["muted"],
-                     font=("Segoe UI", 10), wraplength=420, justify="center").pack()
-            tk.Button(empty, text="＋ הוספת מתכונים", command=self.add_files,
-                      bg=self.colors["accent"], fg="#FFFFFF", activebackground=self.colors["accent_hover"],
-                      relief="flat", bd=0, padx=18, pady=9, cursor="hand2",
-                      font=("Segoe UI", 10, "bold")).pack(pady=(16, 0))
+            empty_shell = RoundedPanel(
+                self.gallery_inner, surface=self.colors["row_alt"],
+                background=self.colors["surface"], outline=self.colors["border"],
+                shadow=self.colors["shadow"], radius=22, padding=2,
+                height=285, show_shadow=False
+            )
+            empty_shell.grid(row=0, column=0, columnspan=columns, sticky="nsew", padx=16, pady=20)
+            empty = empty_shell.content
+            tk.Label(empty, text="✦", bg=self.colors["row_alt"], fg=self.colors["accent"],
+                     font=("Segoe UI Symbol", 38)).pack(pady=(42, 8))
+            tk.Label(empty, text="הספרייה שלך מחכה למתכונים הראשונים",
+                     bg=self.colors["row_alt"], fg=self.colors["navy"],
+                     font=("Segoe UI", 16, "bold")).pack(pady=(4, 5))
+            tk.Label(empty, text="הוסיפו מתכון, תמונה או תיקייה שלמה — והכול יופיע כאן.",
+                     bg=self.colors["row_alt"], fg=self.colors["muted"],
+                     font=("Segoe UI", 10), wraplength=460, justify="center").pack()
+            ModernButton(
+                empty, text="＋  הוספת מתכונים", command=self.add_files,
+                width=170, height=42, bg=self.colors["accent"],
+                fg="#FFFFFF", hover_bg=self.colors["accent_hover"],
+                active_bg=self.colors["accent_hover"], radius=14,
+                font=("Segoe UI", 10, "bold"), canvas_bg=self.colors["row_alt"]
+            ).pack(pady=(17, 36))
             self.gallery_canvas.configure(scrollregion=self.gallery_canvas.bbox("all"))
             return
 
-        for index, (_score, row, file_size, _imported) in enumerate(ranked):
+        gallery_limit = max(48, int(getattr(self, "_gallery_limit", 60)))
+        visible_rows = ranked[:gallery_limit]
+        for index, (_score, row, file_size, _imported) in enumerate(visible_rows):
             item_id = str(row["id"])
             selected = item_id == str(self.selected_item_id)
-            card = tk.Frame(
-                self.gallery_inner, background=self.colors["surface"],
-                highlightbackground=self.colors["accent"] if selected else self.colors["border"],
-                highlightthickness=2 if selected else 1, bd=0, cursor="hand2"
+            card = RoundedPanel(
+                self.gallery_inner, surface=self.colors["surface"],
+                background=self.colors["surface"],
+                outline=self.colors["accent"] if selected else self.colors["border"],
+                shadow=self.colors["shadow"], radius=18, padding=1,
+                width=280, height=264, show_shadow=True
             )
             card.grid(
                 row=index // columns, column=columns - 1 - (index % columns),
-                sticky="nsew", padx=8, pady=8
+                sticky="nsew", padx=9, pady=9
             )
             self.gallery_cards[item_id] = card
+            body = card.content
             data = self.library.get_recipe_data(row["id"])
             image_path = str(data.get("image_path") or "")
             if not image_path and row["extension"].lower() in IMAGE_TYPES:
                 image_path = row["stored_path"]
+
+            media = tk.Frame(body, bg=self.colors["cover"], height=145)
+            media.pack(fill="x", padx=10, pady=(10, 8))
+            media.pack_propagate(False)
             preview = None
             if image_path and Image is not None and ImageTk is not None:
                 try:
                     with Image.open(image_path) as source:
                         source = ImageOps.exif_transpose(source).convert("RGB")
-                        source = ImageOps.fit(source, (250, 132))
+                        source = ImageOps.fit(source, (320, 145))
+                        try:
+                            from PIL import ImageDraw
+                            mask = Image.new("L", source.size, 0)
+                            ImageDraw.Draw(mask).rounded_rectangle(
+                                (0, 0, source.width - 1, source.height - 1),
+                                radius=14, fill=255
+                            )
+                            source.putalpha(mask)
+                        except Exception:
+                            pass
                         preview = ImageTk.PhotoImage(source.copy())
                     self.gallery_photos.append(preview)
                 except Exception:
                     preview = None
-            cover = tk.Frame(card, bg=self.colors["cover"], height=132)
-            cover.pack(fill="x", padx=9, pady=(9, 5))
-            cover.pack_propagate(False)
+
             if preview is not None:
-                image_label = tk.Label(cover, image=preview, bg=self.colors["cover"], cursor="hand2")
+                image_label = tk.Label(media, image=preview, bg=self.colors["cover"], cursor="hand2")
                 image_label.image = preview
                 image_label.pack(fill="both", expand=True)
             else:
-                tk.Label(cover, text="🍲", bg=self.colors["cover"], fg=self.colors["accent"],
-                         font=("Segoe UI Emoji", 40), cursor="hand2").pack(expand=True)
+                placeholder = tk.Frame(media, bg=self.colors["cover"])
+                placeholder.pack(fill="both", expand=True)
+                tk.Label(
+                    placeholder, text="✦", bg=self.colors["cover"],
+                    fg=self.colors["accent"], font=("Segoe UI Symbol", 32)
+                ).pack(expand=True)
+                tk.Label(
+                    placeholder, text="מתכון מהספרייה", bg=self.colors["cover"],
+                    fg=self.colors["muted"], font=("Segoe UI", 8)
+                ).pack(pady=(0, 12))
+
+            if row["is_favorite"]:
+                tk.Label(
+                    media, text="★", bg=self.colors["surface"], fg=self.colors["accent"],
+                    font=("Segoe UI", 11, "bold"), padx=6, pady=2
+                ).place(relx=0.96, rely=0.08, anchor="ne")
+
             tk.Label(
-                card, text=row["title"], background=self.colors["surface"],
-                foreground=self.colors["navy"], font=("Segoe UI", 11, "bold"),
-                justify="right", anchor="e", wraplength=235, height=2
-            ).pack(fill="x", padx=12, pady=(4, 2))
+                body, text=row["title"], bg=self.colors["surface"],
+                fg=self.colors["navy"], font=("Segoe UI", 11, "bold"),
+                justify="right", anchor="e", wraplength=245, height=2
+            ).pack(fill="x", padx=14, pady=(2, 1))
+
             prep = str(data.get("prep_minutes") or "").strip()
             cook = str(data.get("cook_minutes") or "").strip()
             servings = str(data.get("servings") or "").strip()
@@ -1667,19 +1993,39 @@ class App:
                 meta_parts.append(f"{total} דק׳")
             if servings:
                 meta_parts.append(f"{servings} מנות")
+            if not meta_parts and data.get("category"):
+                meta_parts.append(str(data.get("category")).split("/")[-1])
             rating = str(data.get("rating") or "").strip()
             if rating.isdigit() and int(rating) > 0:
                 meta_parts.append("★ " + rating)
             tk.Label(
-                card, text="  ·  ".join(meta_parts) if meta_parts else (data.get("category") or "מתכון"),
-                background=self.colors["surface"], foreground=self.colors["muted"],
-                font=("Segoe UI", 9), justify="right", anchor="e"
-            ).pack(fill="x", padx=12, pady=(1, 9))
-            if row["is_favorite"]:
-                tk.Label(card, text="★", background=self.colors["surface"],
-                         foreground=self.colors["accent"], font=("Segoe UI", 12, "bold")).place(relx=0.94, y=10, anchor="ne")
+                body, text="   ·   ".join(meta_parts) if meta_parts else "מתכון",
+                bg=self.colors["surface"], fg=self.colors["muted"],
+                font=("Segoe UI", 8), justify="right", anchor="e"
+            ).pack(fill="x", padx=14, pady=(1, 10))
             self._bind_gallery_click(card, item_id)
+
+        if len(ranked) > len(visible_rows):
+            more_row = (len(visible_rows) + columns - 1) // columns
+            more_button = ModernButton(
+                self.gallery_inner,
+                text=f"הצגת עוד {min(48, len(ranked) - len(visible_rows))} מתכונים  ↓",
+                command=self._load_more_recipes,
+                width=220, height=42,
+                bg=self.colors["pill"], fg=self.colors["pill_text"],
+                hover_bg=self.colors["soft"], active_bg=self.colors["sidebar_active"],
+                radius=14, font=("Segoe UI", 9, "bold"),
+                canvas_bg=self.colors["surface"]
+            )
+            more_button.grid(
+                row=more_row, column=0, columnspan=columns,
+                padx=12, pady=(10, 20)
+            )
         self.gallery_canvas.configure(scrollregion=self.gallery_canvas.bbox("all"))
+
+    def _load_more_recipes(self):
+        self._gallery_limit = max(48, int(getattr(self, "_gallery_limit", 60))) + 48
+        self._render_gallery(getattr(self, "_gallery_ranked", []))
 
 
     def _update_filter_options(self):
@@ -1836,6 +2182,8 @@ class App:
                 tags=("even" if index % 2 == 0 else "odd",)
             )
         self._render_gallery(ranked)
+        if hasattr(self, "count_label"):
+            self.count_label.configure(text=f"{len(ranked)} מתכונים")
         self.status_value.set(f"נמצאו {len(ranked)} פריטים לפי הסינון הנוכחי.")
         if selected_id and selected_id in self.current_rows:
             self.selected_item_id = selected_id
@@ -1881,11 +2229,14 @@ class App:
         if self.favorite_button is None:
             return
         if row is None:
-            self.favorite_button.configure(text="☆ הוספה למועדפים", state="disabled")
+            self.favorite_button.set_text("☆  מועדפים")
+            self.favorite_button.set_disabled(True)
         elif row["is_favorite"]:
-            self.favorite_button.configure(text="★ הסרה מהמועדפים", state="normal")
+            self.favorite_button.set_text("★  במועדפים")
+            self.favorite_button.set_disabled(False)
         else:
-            self.favorite_button.configure(text="☆ הוספה למועדפים", state="normal")
+            self.favorite_button.set_text("☆  הוספה למועדפים")
+            self.favorite_button.set_disabled(False)
 
     def show_selected(self, _event=None):
         row = self.selected_row()
@@ -1899,22 +2250,24 @@ class App:
         self._render_gallery_cards_selection()
 
     def _render_reader(self, row):
-        """Render the active recipe as a scrollable reading page."""
+        """Render a premium, easy-to-read recipe card inside the home screen."""
         if not hasattr(self, "reader_inner"):
             return
         for child in self.reader_inner.winfo_children():
             child.destroy()
         self.favorite_button = None
         self.reader_photos = []
+        c = self.colors
         if row is None:
-            tk.Label(self.reader_inner, text="📖", bg=self.colors["surface"],
-                     fg=self.colors["accent"], font=("Segoe UI Emoji", 42)).pack(fill="x", pady=(52, 8))
+            tk.Label(self.reader_inner, text="✦", bg=c["surface"], fg=c["accent"],
+                     font=("Segoe UI Symbol", 42)).pack(fill="x", pady=(52, 8))
             tk.Label(self.reader_inner, text="המתכון הבא שלך מתחיל כאן",
-                     bg=self.colors["surface"], fg=self.colors["navy"],
-                     font=("Segoe UI", 14, "bold"), wraplength=320, justify="center").pack(fill="x", padx=18)
-            tk.Label(self.reader_inner, text="בחרו מתכון מהכרטיסים כדי לקרוא את המצרכים וההוראות.",
-                     bg=self.colors["surface"], fg=self.colors["muted"],
-                     font=("Segoe UI", 10), wraplength=310, justify="center").pack(fill="x", padx=18, pady=(6, 0))
+                     bg=c["surface"], fg=c["navy"], font=("Segoe UI", 14, "bold"),
+                     wraplength=280, justify="center").pack(fill="x", padx=18)
+            tk.Label(self.reader_inner,
+                     text="בחרו כרטיס מהספרייה כדי לקרוא את המצרכים ואת שלבי ההכנה.",
+                     bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                     wraplength=270, justify="center").pack(fill="x", padx=18, pady=(7, 0))
             return
 
         data = self.library.get_recipe_data(row["id"])
@@ -1926,7 +2279,16 @@ class App:
             try:
                 with Image.open(image_path) as source:
                     source = ImageOps.exif_transpose(source).convert("RGB")
-                    source = ImageOps.fit(source, (330, 176))
+                    source = ImageOps.fit(source, (292, 156))
+                    try:
+                        from PIL import ImageDraw
+                        mask = Image.new("L", source.size, 0)
+                        ImageDraw.Draw(mask).rounded_rectangle(
+                            (0, 0, source.width - 1, source.height - 1), radius=16, fill=255
+                        )
+                        source.putalpha(mask)
+                    except Exception:
+                        pass
                     photo = ImageTk.PhotoImage(source.copy())
                 self.reader_photos.append(photo)
             except Exception:
@@ -1935,94 +2297,105 @@ class App:
             try:
                 with fitz.open(row["stored_path"]) as document:
                     if document.page_count:
-                        page = document[0]
-                        pix = page.get_pixmap(matrix=fitz.Matrix(1.1, 1.1), alpha=False)
+                        pix = document[0].get_pixmap(matrix=fitz.Matrix(1.0, 1.0), alpha=False)
                         source = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                        source = ImageOps.fit(source, (330, 176))
+                        source = ImageOps.fit(source, (292, 156))
                         photo = ImageTk.PhotoImage(source.copy())
                         self.reader_photos.append(photo)
             except Exception:
                 photo = None
+
         if photo is not None:
-            image_label = tk.Label(self.reader_inner, image=photo, bg=self.colors["surface"])
+            image_label = tk.Label(self.reader_inner, image=photo, bg=c["surface"], highlightthickness=0, bd=0)
             image_label.image = photo
-            image_label.pack(fill="x", padx=14, pady=(7, 10))
+            image_label.pack(fill="x", padx=12, pady=(10, 11))
         else:
-            cover = tk.Frame(self.reader_inner, bg=self.colors["cover"], height=112)
-            cover.pack(fill="x", padx=14, pady=(7, 10))
-            cover.pack_propagate(False)
-            tk.Label(cover, text="🍲", bg=self.colors["cover"], fg=self.colors["accent"],
-                     font=("Segoe UI Emoji", 38)).pack(expand=True)
+            cover = RoundedPanel(
+                self.reader_inner, surface=c["cover"], background=c["surface"],
+                outline=c["border"], shadow=c["shadow"], radius=17,
+                padding=1, height=124, show_shadow=False
+            )
+            cover.pack(fill="x", padx=12, pady=(10, 11))
+            tk.Label(cover.content, text="✦", bg=c["cover"], fg=c["accent"],
+                     font=("Segoe UI Symbol", 34)).pack(expand=True)
+            tk.Label(cover.content, text="מתכון מהספרייה שלך", bg=c["cover"],
+                     fg=c["muted"], font=("Segoe UI", 8)).pack(pady=(0, 12))
 
         tk.Label(
-            self.reader_inner, text=row["title"], bg=self.colors["surface"],
-            fg=self.colors["navy"], font=("Segoe UI", 17, "bold"),
-            justify="right", anchor="e", wraplength=325
-        ).pack(fill="x", padx=16, pady=(0, 5))
+            self.reader_inner, text=row["title"], bg=c["surface"], fg=c["navy"],
+            font=("Segoe UI", 17, "bold"), justify="right", anchor="e", wraplength=278
+        ).pack(fill="x", padx=15, pady=(0, 5))
+
         meta = []
         if data.get("category"):
-            meta.append(str(data["category"]))
+            meta.append(str(data["category"]).split("/")[-1])
         if data.get("prep_minutes"):
-            meta.append(f"הכנה: {data['prep_minutes']} דק׳")
+            meta.append(f"הכנה {data['prep_minutes']} דק׳")
         if data.get("cook_minutes"):
-            meta.append(f"בישול: {data['cook_minutes']} דק׳")
+            meta.append(f"בישול {data['cook_minutes']} דק׳")
         if data.get("servings"):
             meta.append(f"{data['servings']} מנות")
         if data.get("rating"):
             meta.append("★ " + str(data["rating"]))
         tk.Label(
-            self.reader_inner, text="  ·  ".join(meta) if meta else "מתכון מהספרייה שלך",
-            bg=self.colors["surface"], fg=self.colors["muted"],
-            font=("Segoe UI", 9), justify="right", anchor="e", wraplength=325
-        ).pack(fill="x", padx=16, pady=(0, 9))
+            self.reader_inner, text="   ·   ".join(meta) if meta else "מהאוסף האישי שלך",
+            bg=c["surface"], fg=c["muted"], font=("Segoe UI", 8),
+            justify="right", anchor="e", wraplength=280
+        ).pack(fill="x", padx=15, pady=(0, 11))
 
-        actions = tk.Frame(self.reader_inner, bg=self.colors["surface"])
-        actions.pack(fill="x", padx=12, pady=(0, 11))
-        self.favorite_button = tk.Button(
-            actions, text="★ מועדף" if row["is_favorite"] else "☆ מועדף",
-            command=self.toggle_favorite, bg=self.colors["row_alt"], fg=self.colors["navy"],
-            activebackground=self.colors["selected"], relief="flat", bd=0,
-            padx=10, pady=7, cursor="hand2", font=("Segoe UI", 9, "bold")
+        actions = tk.Frame(self.reader_inner, bg=c["surface"])
+        actions.pack(fill="x", padx=10, pady=(0, 8))
+        self.favorite_button = ModernButton(
+            actions, text="★  מועדף" if row["is_favorite"] else "☆  הוספה למועדפים",
+            command=self.toggle_favorite, width=145, height=36,
+            bg=c["pill"], fg=c["pill_text"], hover_bg=c["soft"],
+            active_bg=c["sidebar_active"], active_fg="#FFFFFF",
+            radius=12, font=("Segoe UI", 8, "bold"), canvas_bg=c["surface"]
         )
         self.favorite_button.pack(side="right", fill="x", expand=True, padx=3)
-        tk.Button(
+        ModernButton(
             actions, text="עריכה", command=self.edit_recipe,
-            bg=self.colors["accent"], fg="#FFFFFF", activebackground=self.colors["accent_hover"],
-            relief="flat", bd=0, padx=10, pady=7, cursor="hand2",
-            font=("Segoe UI", 9, "bold")
-        ).pack(side="right", fill="x", expand=True, padx=3)
-        tools = tk.Frame(self.reader_inner, bg=self.colors["surface"])
-        tools.pack(fill="x", padx=12, pady=(0, 10))
-        tk.Button(
-            tools, text="מצב בישול", command=lambda: self.open_recipe_center(initial_item_id=int(row["id"])),
-            bg=self.colors["row_alt"], fg=self.colors["navy"], activebackground=self.colors["selected"],
-            relief="flat", bd=0, padx=10, pady=7, cursor="hand2", font=("Segoe UI", 9)
-        ).pack(side="right", fill="x", expand=True, padx=3)
-        tk.Button(
-            tools, text="הדפסה", command=self.print_selected_recipe,
-            bg=self.colors["row_alt"], fg=self.colors["navy"], activebackground=self.colors["selected"],
-            relief="flat", bd=0, padx=10, pady=7, cursor="hand2", font=("Segoe UI", 9)
+            width=80, height=36, bg=c["accent"], fg="#FFFFFF",
+            hover_bg=c["accent_hover"], active_bg=c["accent_hover"],
+            radius=12, font=("Segoe UI", 9, "bold"), canvas_bg=c["surface"]
         ).pack(side="right", fill="x", expand=True, padx=3)
 
-        def add_section(heading, content, height=6):
-            section = tk.Frame(self.reader_inner, bg=self.colors["surface"])
-            section.pack(fill="x", padx=15, pady=(4, 9))
-            tk.Label(section, text=heading, bg=self.colors["surface"], fg=self.colors["navy"],
-                     font=("Segoe UI", 11, "bold"), anchor="e").pack(fill="x", pady=(0, 4))
+        tools = tk.Frame(self.reader_inner, bg=c["surface"])
+        tools.pack(fill="x", padx=10, pady=(0, 12))
+        ModernButton(
+            tools, text="מצב בישול", command=lambda: self.open_recipe_center(initial_item_id=int(row["id"])),
+            width=130, height=34, bg=c["row_alt"], fg=c["navy"],
+            hover_bg=c["soft"], radius=12, font=("Segoe UI", 8, "bold"),
+            canvas_bg=c["surface"]
+        ).pack(side="right", fill="x", expand=True, padx=3)
+        ModernButton(
+            tools, text="הדפסה", command=self.print_selected_recipe,
+            width=90, height=34, bg=c["row_alt"], fg=c["navy"],
+            hover_bg=c["soft"], radius=12, font=("Segoe UI", 8, "bold"),
+            canvas_bg=c["surface"]
+        ).pack(side="right", fill="x", expand=True, padx=3)
+
+        def add_section(heading, content, min_lines=4):
+            section = tk.Frame(self.reader_inner, bg=c["surface"])
+            section.pack(fill="x", padx=13, pady=(4, 8))
+            tk.Label(section, text=heading, bg=c["surface"], fg=c["navy"],
+                     font=("Segoe UI", 10, "bold"), anchor="e").pack(fill="x", pady=(0, 5))
             text_value = content or "לא נשמר עדיין מידע בחלק הזה."
-            # Estimate wrapped visual lines so long ingredient lists and
-            # instructions remain readable inside the scrolling recipe panel.
-            visual_lines = sum(
-                max(1, (len(line) + 33) // 34)
-                for line in str(text_value).splitlines()
-            ) or 1
-            area_height = max(4, min(120, visual_lines + 1))
-            area = tk.Text(
-                section, height=area_height, wrap="word", font=("Segoe UI", 10),
-                bg=self.colors["row_alt"], fg=self.colors["text"], relief="flat",
-                bd=0, padx=10, pady=8, spacing1=2, spacing3=3
+            visual_lines = sum(max(1, (len(line) + 31) // 32) for line in str(text_value).splitlines()) or 1
+            box_height = max(min_lines, min(18, visual_lines + 1))
+            text_shell = RoundedPanel(
+                section, surface=c["row_alt"], background=c["surface"],
+                outline=c["border"], shadow=c["shadow"],
+                radius=13, padding=1, height=max(74, 21 * box_height), show_shadow=False
             )
-            area.pack(fill="x")
+            text_shell.pack(fill="x")
+            area = tk.Text(
+                text_shell.content, height=box_height, wrap="word",
+                font=("Segoe UI", 10), bg=c["row_alt"], fg=c["text"],
+                relief="flat", bd=0, padx=11, pady=9,
+                spacing1=2, spacing3=3
+            )
+            area.pack(fill="both", expand=True, padx=2, pady=2)
             area.insert("1.0", text_value)
             area.tag_configure("rtl", justify="right")
             area.tag_add("rtl", "1.0", "end")
@@ -2032,12 +2405,12 @@ class App:
         parsed = parse_recipe_text(content)
         ingredients = data.get("ingredients") or parsed.get("ingredients", "")
         instructions = data.get("instructions") or parsed.get("instructions", "")
-        add_section("מצרכים", ingredients, max(4, min(9, len((ingredients or "").splitlines()) + 1)))
-        add_section("אופן ההכנה", instructions, max(5, min(12, len((instructions or "").splitlines()) + 1)))
+        add_section("מצרכים", ingredients, 4)
+        add_section("אופן ההכנה", instructions, 5)
         if data.get("notes"):
-            add_section("הערות", data["notes"], 4)
+            add_section("הערות אישיות", data["notes"], 3)
         if not ingredients and not instructions and content:
-            add_section("הטקסט המקורי", content[:5000], 9)
+            add_section("הטקסט המקורי", content[:5000], 7)
         self.reader_canvas.update_idletasks()
         self.reader_canvas.configure(scrollregion=self.reader_canvas.bbox("all"))
         self.reader_canvas.yview_moveto(0)
