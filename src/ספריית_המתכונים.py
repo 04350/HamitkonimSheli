@@ -60,7 +60,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.11.0"
 def _rounded_points(x1, y1, x2, y2, radius=14, steps=8):
     """Create a polygon outline with smooth rounded corners."""
     width = max(1, x2 - x1)
@@ -195,6 +195,7 @@ class RoundedPanel(tk.Canvas):
         self.shadow_color = shadow
         self.radius = radius
         self.inner_padding = padding
+        self.content_inset = max(padding + 1, min(10, max(5, radius // 2)))
         self.show_shadow = show_shadow
         super().__init__(
             parent, width=width, height=height, bg=background,
@@ -202,7 +203,7 @@ class RoundedPanel(tk.Canvas):
         )
         self.content = tk.Frame(self, bg=surface, bd=0, highlightthickness=0)
         self.window_id = self.create_window(
-            padding + 1, padding + 1, anchor="nw", window=self.content
+            self.content_inset, self.content_inset, anchor="nw", window=self.content
         )
         self.bind("<Configure>", self._resize)
         self._draw()
@@ -210,7 +211,8 @@ class RoundedPanel(tk.Canvas):
     def _resize(self, event=None):
         width = max(4, event.width if event else self.winfo_width())
         height = max(4, event.height if event else self.winfo_height())
-        pad = self.inner_padding + 1
+        pad = self.content_inset
+        self.coords(self.window_id, pad, pad)
         self.itemconfigure(
             self.window_id,
             width=max(1, width - pad * 2),
@@ -1487,7 +1489,8 @@ class App:
                 self._embedded_pages[-1].place_forget()
             except tk.TclError:
                 pass
-        page = tk.Frame(self.shell, bg=self.colors["background"], bd=0, highlightthickness=0)
+        host = getattr(self, "workspace", self.shell)
+        page = tk.Frame(host, bg=self.colors["background"], bd=0, highlightthickness=0)
         page.place(relx=0, rely=0, relwidth=1, relheight=1)
         page.lift()
         page.page_title = title
@@ -1524,9 +1527,12 @@ class App:
                 pass
         else:
             try:
-                self.shell.lift()
-            except tk.TclError:
-                pass
+                self.workspace.lift()
+            except (tk.TclError, AttributeError):
+                try:
+                    self.shell.lift()
+                except tk.TclError:
+                    pass
 
     def _embedded_header(self, parent, title, subtitle="", back_command=None, back_text="→  חזרה לספרייה"):
         """Create the shared in-app page header with a clear back action."""
@@ -1563,6 +1569,18 @@ class App:
             self.library.set_setting("reader_pane_width", str(reader_width))
         except (tk.TclError, ValueError, IndexError):
             pass
+
+    def _reset_reader_sash_position(self, _event=None):
+        """Double-click the divider to restore a balanced reader width."""
+        try:
+            width = max(1, self.content_splitter.winfo_width())
+            reader_width = 410
+            target = max(440, width - reader_width)
+            self.content_splitter.sash_place(0, target, 0)
+            self.library.set_setting("reader_pane_width", str(reader_width))
+        except (tk.TclError, ValueError, IndexError):
+            pass
+        return "break"
 
     def _set_reader_preview_mode(self, mode):
         if mode not in ("image", "text"):
@@ -1645,6 +1663,7 @@ class App:
 
         workspace = tk.Frame(self.shell, bg=c["background"], padx=26, pady=23)
         workspace.pack(side="left", fill="both", expand=True)
+        self.workspace = workspace
         header = tk.Frame(workspace, bg=c["background"])
         header.pack(fill="x", pady=(0, 17))
         heading = tk.Frame(header, bg=c["background"])
@@ -1741,11 +1760,13 @@ class App:
         content_area.pack(fill="both", expand=True)
         self.content_splitter = tk.PanedWindow(
             content_area, orient="horizontal", background=c["background"],
-            sashwidth=9, sashpad=3, sashrelief="flat", borderwidth=0,
-            relief="flat", opaqueresize=True, showhandle=False
+            sashwidth=13, sashpad=2, sashrelief="raised", borderwidth=0,
+            relief="flat", opaqueresize=True, showhandle=True,
+            handlesize=20, handlepad=3, sashcursor="sb_h_double_arrow"
         )
         self.content_splitter.pack(fill="both", expand=True)
         self.content_splitter.bind("<ButtonRelease-1>", self._save_reader_sash_position)
+        self.content_splitter.bind("<Double-Button-1>", self._reset_reader_sash_position)
         reader_shell = RoundedPanel(
             self.content_splitter, surface=c["surface"], background=c["background"],
             outline=c["border"], shadow=c["shadow"], radius=21,
@@ -1759,7 +1780,7 @@ class App:
             fg=c["navy"], font=("Segoe UI", 14, "bold"), anchor="e"
         ).pack(fill="x")
         tk.Label(
-            reader_heading, text="המצרכים ואופן ההכנה, בלי לעזוב את הספרייה",
+            reader_heading, text="תמונה או טקסט שחולץ · גררו את המפריד לשינוי רוחב",
             bg=c["surface"], fg=c["muted"], font=("Segoe UI", 8), anchor="e"
         ).pack(fill="x", pady=(3, 0))
         tk.Frame(self.reader_panel, bg=c["border"], height=1).pack(fill="x", padx=16, pady=(0, 4))
@@ -1930,6 +1951,10 @@ class App:
             self.settings()
             return
 
+        if key in ("recipes", "favorites", "files") and self._embedded_pages:
+            while self._embedded_pages:
+                self._pop_embedded_page()
+
         self.current_page = key
         if key == "recipes":
             self.filter_value.set("כל הקבצים")
@@ -1964,6 +1989,7 @@ class App:
         self.change_view_mode()
 
     def _rebuild_shell(self):
+        self._embedded_pages = []
         try:
             self.shell.destroy()
         except Exception:
@@ -2459,7 +2485,7 @@ class App:
             try:
                 with Image.open(image_path) as source:
                     source = ImageOps.exif_transpose(source).convert("RGB")
-                    source = ImageOps.fit(source, (292, 156))
+                    source.thumbnail((304, 430), getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1))
                     try:
                         from PIL import ImageDraw
                         mask = Image.new("L", source.size, 0)
@@ -2479,7 +2505,7 @@ class App:
                     if document.page_count:
                         pix = document[0].get_pixmap(matrix=fitz.Matrix(1.0, 1.0), alpha=False)
                         source = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                        source = ImageOps.fit(source, (292, 156))
+                        source.thumbnail((304, 430), getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1))
                         photo = ImageTk.PhotoImage(source.copy())
                         self.reader_photos.append(photo)
             except Exception:
@@ -2488,7 +2514,7 @@ class App:
         if mode == "image" and photo is not None:
             image_label = tk.Label(self.reader_inner, image=photo, bg=c["surface"], highlightthickness=0, bd=0)
             image_label.image = photo
-            image_label.pack(fill="x", padx=12, pady=(10, 11))
+            image_label.pack(anchor="center", padx=12, pady=(10, 11))
         elif mode == "image":
             cover = RoundedPanel(
                 self.reader_inner, surface=c["cover"], background=c["surface"],
@@ -3146,11 +3172,6 @@ class App:
         )
         outer = tk.Frame(window, bg=self.colors["background"], padx=18, pady=8)
         outer.pack(fill="both", expand=True)
-        tk.Label(outer, text="סורק מתכונים חכם", bg=self.colors["background"],
-                 fg=self.colors["navy"], font=("Segoe UI", 22, "bold"), anchor="e").pack(fill="x")
-        tk.Label(outer, text="מייבאים צילום או PDF סרוק, בודקים את הזיהוי ושומרים מתכון מסודר.",
-                 bg=self.colors["background"], fg=self.colors["muted"],
-                 font=("Segoe UI", 10), anchor="e").pack(fill="x", pady=(2, 12))
 
         state = {"paths": [], "result": None, "current_path": None, "preview": None}
         toolbar = tk.Frame(outer, bg=self.colors["surface"], padx=12, pady=10)
@@ -3168,12 +3189,13 @@ class App:
 
         body = tk.Frame(outer, bg=self.colors["background"])
         body.pack(fill="both", expand=True)
-        source_panel = tk.Frame(
-            body, bg=self.colors["surface"], width=440,
-            highlightbackground=self.colors["border"], highlightthickness=1
+        source_shell = RoundedPanel(
+            body, surface=self.colors["surface"], background=self.colors["background"],
+            outline=self.colors["border"], shadow=self.colors["shadow"],
+            radius=19, padding=2, width=440, show_shadow=True
         )
-        source_panel.pack(side="left", fill="both", padx=(0, 12))
-        source_panel.pack_propagate(False)
+        source_shell.pack(side="left", fill="both", padx=(0, 12))
+        source_panel = source_shell.content
         tk.Label(source_panel, text="המסמך המקורי", bg=self.colors["surface"],
                  fg=self.colors["navy"], font=("Segoe UI", 12, "bold"), anchor="e").pack(fill="x", padx=12, pady=10)
         source_view = tk.Label(
@@ -3183,12 +3205,13 @@ class App:
         )
         source_view.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-        editor = tk.Frame(
-            body, bg=self.colors["surface"],
-            highlightbackground=self.colors["border"], highlightthickness=1
+        editor_shell = RoundedPanel(
+            body, surface=self.colors["surface"], background=self.colors["background"],
+            outline=self.colors["border"], shadow=self.colors["shadow"],
+            radius=19, padding=2, show_shadow=True
         )
-        editor.pack(side="left", fill="both", expand=True)
-        editor_inner = tk.Frame(editor, bg=self.colors["surface"], padx=14, pady=12)
+        editor_shell.pack(side="left", fill="both", expand=True)
+        editor_inner = tk.Frame(editor_shell.content, bg=self.colors["surface"], padx=14, pady=12)
         editor_inner.pack(fill="both", expand=True)
         title_var = tk.StringVar()
         tk.Label(editor_inner, text="שם המתכון", bg=self.colors["surface"],

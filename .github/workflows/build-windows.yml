@@ -230,15 +230,26 @@ jobs:
 
       - name: צילום מסך אמיתי של הממשק מתוך Windows
         shell: pwsh
-        continue-on-error: true
         run: |
-          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "recipe-ui-demo-profile"
+          $demoProfile = Join-Path $env:RUNNER_TEMP "recipe-ui-demo-profile"
+          New-Item -ItemType Directory -Force -Path $demoProfile | Out-Null
+          $env:LOCALAPPDATA = $demoProfile
           python scripts/create_ui_demo_data.py
-          $exe = "dist/חבילת-ספריית-המתכונים/ספריית_המתכונים_שלי.exe"
-          $process = Start-Process -FilePath $exe -PassThru
+          if ($LASTEXITCODE -ne 0) { throw "Demo recipes could not be created." }
+
+          $exe = (Resolve-Path "dist/חבילת-ספריית-המתכונים/ספריית_המתכונים_שלי.exe").Path
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $startInfo.FileName = $exe
+          $startInfo.WorkingDirectory = (Get-Location).Path
+          $startInfo.UseShellExecute = $false
+          $startInfo.Environment["LOCALAPPDATA"] = $demoProfile
+          $process = [System.Diagnostics.Process]::Start($startInfo)
+          if (!$process) { throw "Could not start the packaged app for screenshot capture." }
           try {
-            Start-Sleep -Seconds 8
-            python scripts/capture_app_screenshot.py --output "dist/recipe-library-real-ui.png"
+            Start-Sleep -Seconds 12
+            python scripts/capture_app_screenshot.py --output "dist/recipe-library-real-ui.png" --process-id $process.Id --expected-items 6
+            if ($LASTEXITCODE -ne 0) { throw "The real Windows UI screenshot could not be captured." }
+            if (!(Test-Path "dist/recipe-library-real-ui.png")) { throw "The UI screenshot file is missing." }
           } finally {
             if ($process -and !$process.HasExited) {
               Stop-Process -Id $process.Id -Force

@@ -146,8 +146,24 @@ def main():
     library.set_setting("color_theme", "מרווה")
     library.set_setting("font_size", "10")
     library.set_setting("reader_preview_mode", "image")
+    rows = library.rows()
+    recipe_rows = [
+        row for row in rows
+        if app.is_recipe_record(library.get_recipe_data(row["id"]), row["content"] or "")
+    ]
+    missing_images = [
+        row["title"] for row in recipe_rows
+        if not Path(library.get_recipe_data(row["id"]).get("image_path") or "").is_file()
+    ]
+    if len(recipe_rows) != len(RECIPES) or missing_images:
+        library.db.close()
+        raise SystemExit(
+            f"Demo data check failed: {len(recipe_rows)} recipes for {len(RECIPES)} expected; "
+            f"missing photos: {len(missing_images)}"
+        )
+    profile_home = str(library.home)
     library.db.close()
-    print(f"Demo recipe library ready: {len(RECIPES)} sample recipes.")
+    print(f"DEMO_OK|{len(recipe_rows)}|{profile_home}")
 
 
 if __name__ == "__main__":
