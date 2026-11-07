@@ -1528,7 +1528,7 @@ class App:
             except tk.TclError:
                 pass
 
-    def _embedded_header(self, parent, title, subtitle=""):
+    def _embedded_header(self, parent, title, subtitle="", back_command=None):
         """Create the shared in-app page header with a clear back action."""
         header = tk.Frame(parent, bg=self.colors["background"], padx=22, pady=16)
         header.pack(fill="x")
@@ -1543,9 +1543,11 @@ class App:
                 title_area, text=subtitle, bg=self.colors["background"],
                 fg=self.colors["muted"], font=("Segoe UI", 9), anchor="e"
             ).pack(fill="x", pady=(3, 0))
+        if back_command is None:
+            back_command = lambda target=parent: self._pop_embedded_page(target)
         ModernButton(
             header, text="→  חזרה לספרייה",
-            command=lambda target=parent: self._pop_embedded_page(target),
+            command=back_command,
             width=150, height=40, bg=self.colors["surface"],
             fg=self.colors["navy"], hover_bg=self.colors["soft"],
             active_bg=self.colors["selected"], radius=13,
@@ -3814,27 +3816,10 @@ class App:
                 shutil.rmtree(temporary_directory, ignore_errors=True)
             self._pop_embedded_page(window)
 
-        header = tk.Frame(window, bg=self.colors["background"], padx=20, pady=14)
-        header.pack(fill="x")
-        title_area = tk.Frame(header, bg=self.colors["background"])
-        title_area.pack(side="right", fill="x", expand=True)
-        tk.Label(
-            title_area, text=title, bg=self.colors["background"],
-            fg=self.colors["navy"], font=("Segoe UI", 20, "bold"), anchor="e"
-        ).pack(fill="x")
-        tk.Label(
-            title_area, text="תצוגת המקור או הטקסט שחולץ מהקובץ.",
-            bg=self.colors["background"], fg=self.colors["muted"],
-            font=("Segoe UI", 9), anchor="e"
-        ).pack(fill="x", pady=(3, 0))
-        ModernButton(
-            header, text="→  חזרה",
-            command=close_preview, width=108, height=39,
-            bg=self.colors["surface"], fg=self.colors["navy"],
-            hover_bg=self.colors["soft"], active_bg=self.colors["selected"],
-            radius=13, font=("Segoe UI", 9, "bold"),
-            canvas_bg=self.colors["background"]
-        ).pack(side="left")
+        self._embedded_header(
+            window, title, "תצוגת המקור או הטקסט שחולץ מהקובץ.",
+            back_command=close_preview
+        )
 
         controls = tk.Frame(window, bg=self.colors["background"], padx=20, pady=(0, 9))
         controls.pack(fill="x")
