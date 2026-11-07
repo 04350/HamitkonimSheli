@@ -41,7 +41,8 @@ class EmbeddedNavigationTests(unittest.TestCase):
 
     def test_file_viewer_is_an_embedded_page_with_source_and_text_modes(self):
         source = (ROOT / "src" / "ספריית_המתכונים.py").read_text(encoding="utf-8")
-        self.assertIn('self._embedded_header(window, title', source)
+        self.assertIn("self._embedded_header(", source)
+        self.assertIn('window, title, "תצוגת המקור', source)
         self.assertIn('text="▧  תמונה / מסמך מקורי"', source)
         self.assertIn('text="☷  טקסט שחולץ"', source)
 
