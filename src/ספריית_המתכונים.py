@@ -1707,7 +1707,11 @@ class App:
         else:
             ranked.sort(key=lambda x: (x[3] or datetime.min, x[1]["id"]), reverse=True)
 
-        if not selected_id and ranked and self.current_page in ("recipes", "favorites"):
+        if (
+            ranked
+            and self.current_page in ("recipes", "favorites")
+            and str(selected_id or "") not in {str(entry[1]["id"]) for entry in ranked}
+        ):
             selected_id = str(ranked[0][1]["id"])
 
         for item in self.tree.get_children():
@@ -1900,13 +1904,21 @@ class App:
             section.pack(fill="x", padx=15, pady=(4, 9))
             tk.Label(section, text=heading, bg=self.colors["surface"], fg=self.colors["navy"],
                      font=("Segoe UI", 11, "bold"), anchor="e").pack(fill="x", pady=(0, 4))
+            text_value = content or "לא נשמר עדיין מידע בחלק הזה."
+            # Estimate wrapped visual lines so long ingredient lists and
+            # instructions remain readable inside the scrolling recipe panel.
+            visual_lines = sum(
+                max(1, (len(line) + 33) // 34)
+                for line in str(text_value).splitlines()
+            ) or 1
+            area_height = max(4, min(120, visual_lines + 1))
             area = tk.Text(
-                section, height=height, wrap="word", font=("Segoe UI", 10),
+                section, height=area_height, wrap="word", font=("Segoe UI", 10),
                 bg=self.colors["row_alt"], fg=self.colors["text"], relief="flat",
                 bd=0, padx=10, pady=8, spacing1=2, spacing3=3
             )
             area.pack(fill="x")
-            area.insert("1.0", content or "לא נשמר עדיין מידע בחלק הזה.")
+            area.insert("1.0", text_value)
             area.tag_configure("rtl", justify="right")
             area.tag_add("rtl", "1.0", "end")
             area.configure(state="disabled")
@@ -2749,6 +2761,7 @@ class App:
                 recipe["image_path"] = str(stored_row["stored_path"])
             self.library.set_recipe_data(item_id, recipe)
             self.current_page = "recipes"
+            self.selected_item_id = str(item_id)
             self.filter_value.set("כל הקבצים")
             self.recipe_filter_value.set("מתכונים בלבד")
             self.view_mode.set("גלריה")
