@@ -2738,13 +2738,16 @@ class App:
                 "instructions": instructions,
                 "is_recipe": True,
             })
-            if path.suffix.lower() in IMAGE_TYPES:
-                recipe["image_path"] = str(row["stored_path"])
-            self.library.set_recipe_data(item_id, recipe)
             self.library.db.execute("UPDATE items SET content=? WHERE id=?", (raw_text, item_id))
             self.library.db.commit()
             if title != row["title"]:
                 self.library.rename(item_id, title)
+            stored_row = self.library.db.execute(
+                "SELECT stored_path FROM items WHERE id=?", (item_id,)
+            ).fetchone()
+            if path.suffix.lower() in IMAGE_TYPES and stored_row:
+                recipe["image_path"] = str(stored_row["stored_path"])
+            self.library.set_recipe_data(item_id, recipe)
             self.current_page = "recipes"
             self.filter_value.set("כל הקבצים")
             self.recipe_filter_value.set("מתכונים בלבד")
