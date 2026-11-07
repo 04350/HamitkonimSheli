@@ -115,43 +115,63 @@ jobs:
           Write-Host "נוצר קובץ הפעלה בגודל $($file.Length) בתים"
 
 
-      - name: יצירת חבילה עצמאית עם מנוע תצוגת Office
+      - name: יצירת חבילה קומפקטית עם ארכיון Office יחיד
         shell: pwsh
         run: |
           $exe = "dist/ספריית_המתכונים_שלי.exe"
           $loSource = Join-Path $env:ProgramFiles 'LibreOffice'
           if (!(Test-Path (Join-Path $loSource 'program/soffice.exe'))) {
-            $loSource = Join-Path ${env:ProgramFiles(x86)} 'LibreOffice'
+            $x86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+            $loSource = Join-Path $x86 'LibreOffice'
           }
           if (!(Test-Path (Join-Path $loSource 'program/soffice.exe'))) { throw "LibreOffice folder missing" }
 
           $packageRoot = "dist/חבילת-ספריית-המתכונים"
           New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
-          New-Item -ItemType Directory -Force -Path "$packageRoot/LibreOffice" | Out-Null
           Copy-Item $exe "$packageRoot/"
-          Copy-Item "$loSource/*" "$packageRoot/LibreOffice/" -Recurse -Force
 
-          $soffice = "$packageRoot/LibreOffice/program/soffice.com"
-          if (!(Test-Path $soffice)) { $soffice = "$packageRoot/LibreOffice/program/soffice.exe" }
-          if (!(Test-Path $soffice)) { throw "Bundled LibreOffice executable missing" }
-          & $soffice --headless --version
-          if ($LASTEXITCODE -ne 0) { throw "Bundled LibreOffice failed its startup check" }
+          # Store the entire Office runtime in one nested archive. Extracting
+          # the main ZIP now produces three files rather than thousands.
+          $loArchive = Join-Path $packageRoot "LibreOffice.zip"
+          @'
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          source = Path(sys.argv[1])
+          target = Path(sys.argv[2])
+          count = 0
+          with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=4, allowZip64=True) as archive:
+              for path in source.rglob("*"):
+                  if path.is_file():
+                      archive.write(path, path.relative_to(source).as_posix())
+                      count += 1
+          if count < 1000:
+              raise SystemExit(f"Unexpectedly few Office runtime files: {count}")
+          print(f"Packed {count} LibreOffice files into one archive.")
+          '@ | python - "$loSource" "$loArchive"
+          if (!(Test-Path $loArchive)) { throw "LibreOffice.zip was not created" }
 
           @'
           הפעלת ספריית המתכונים שלי
-          1. חלצו את כל תוכן קובץ ה-ZIP לתיקייה במחשב.
-          2. השאירו את קובץ ההפעלה ואת תיקיית LibreOffice באותה תיקייה.
+          1. חלצו את קובץ ה-ZIP הראשי לתיקייה במחשב.
+          2. השאירו את קובץ ההפעלה ואת LibreOffice.zip באותה תיקייה.
           3. הפעילו את ספריית_המתכונים_שלי.exe.
-          תצוגת Word, Excel ו-PowerPoint מופעלת מתוך התוכנה, ללא פתיחת חלון LibreOffice.
-          ספרים דיגיטליים נתמכים נפתחים בתצוגה פנימית.
+          אין צורך לחלץ את LibreOffice.zip. התוכנה תפרוס אותו אוטומטית לתיקיית הנתונים המקומית רק בפעם הראשונה שתצוגת Office או יצירת PDF יידרשו.
           '@ | Set-Content -Encoding UTF8 "$packageRoot/קראו-לפני-הפעלה.txt"
+
+          $looseFiles = @(Get-ChildItem -LiteralPath $packageRoot -File).Count
+          $looseDirectories = @(Get-ChildItem -LiteralPath $packageRoot -Directory).Count
+          if ($looseFiles -ne 3 -or $looseDirectories -ne 0) {
+            throw "Package should have exactly 3 top-level files and no runtime folders; got $looseFiles files, $looseDirectories directories"
+          }
 
           $zip = "dist/ספריית-המתכונים-שלי-Windows-כולל-תצוגת-Office.zip"
           Compress-Archive -Path "$packageRoot/*" -DestinationPath $zip -CompressionLevel Optimal
           if (!(Test-Path $zip)) { throw "Portable package ZIP was not created" }
           $size = (Get-Item $zip).Length
           if ($size -lt 50000000) { throw "Portable package is unexpectedly small: $size bytes" }
-          Write-Host "Portable package created: $size bytes"
+          Write-Host "Compact package created: $size bytes; extracted layout contains exactly 3 files."
 
       - name: בדיקת מנוע התצוגה מתוך החבילה
         shell: pwsh
@@ -163,13 +183,21 @@ jobs:
           sys.path.insert(0, "src")
           import ספריית_המתכונים as app
 
+          import os
           bundle = Path("dist/חבילת-ספריית-המתכונים").resolve()
           executable = bundle / "ספריית_המתכונים_שלי.exe"
+          archive = bundle / "LibreOffice.zip"
+          if not archive.is_file() or (bundle / "LibreOffice").exists():
+              raise SystemExit("Package must contain LibreOffice.zip and no loose LibreOffice folder")
+          local_data = tempfile.TemporaryDirectory(prefix="recipe-local-data-")
+          os.environ["LOCALAPPDATA"] = local_data.name
           sys.frozen = True
           sys.executable = str(executable)
           engine = app.find_libreoffice()
           if engine is None or not engine.exists():
-              raise SystemExit("Bundled LibreOffice was not discovered next to the EXE")
+              raise SystemExit("LibreOffice.zip was not extracted/discovered")
+          if engine.parent.name.lower() != "program":
+              raise SystemExit("Extracted Office executable has an unexpected path")
 
           with tempfile.TemporaryDirectory() as temp:
               source = Path(temp) / "בדיקת-חבילה.docx"
@@ -184,7 +212,8 @@ jobs:
                       raise SystemExit("Bundled conversion returned an empty PDF")
               import shutil
               shutil.rmtree(temp_dir, ignore_errors=True)
-          print("Bundled Office conversion passed.")
+          local_data.cleanup()
+          print("Bundled Office ZIP extraction and conversion passed.")
           '@ | python -
 
       - name: בדיקת פתיחה של התוכנה מהחבילה

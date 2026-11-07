@@ -2,9 +2,14 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from recipe_scanner import lines_from_tesseract_data, select_title_line
+from PIL import Image
+from recipe_scanner import (
+    MAX_OCR_EDGE, MAX_OCR_PIXELS, best_title_from_pdf_page,
+    lines_from_tesseract_data, preprocess_image, recognize_image, select_title_line,
+)
 
 
 class RecipeScannerTests(unittest.TestCase):
@@ -27,21 +32,15 @@ class RecipeScannerTests(unittest.TestCase):
 
     def test_rebuilds_hebrew_lines_in_right_to_left_order(self):
         data = {
-            "text": ["שוקולד", "עוגת"],
-            "conf": ["90", "90"],
-            "left": ["10", "90"],
-            "top": ["20", "20"],
-            "width": ["70", "50"],
-            "height": ["22", "22"],
-            "block_num": ["1", "1"],
-            "par_num": ["1", "1"],
-            "line_num": ["1", "1"],
+            "text": ["שוקולד", "עוגת"], "conf": ["90", "90"],
+            "left": ["10", "90"], "top": ["20", "20"], "width": ["70", "50"],
+            "height": ["22", "22"], "block_num": ["1", "1"],
+            "par_num": ["1", "1"], "line_num": ["1", "1"],
         }
         result = lines_from_tesseract_data(data)
         self.assertEqual(result[0]["text"], "עוגת שוקולד")
 
     def test_pdf_title_uses_larger_font_and_not_first_line(self):
-        from recipe_scanner import best_title_from_pdf_page
         class FakePage:
             rect = type("Rect", (), {"height": 900})()
             def get_text(self, kind):
@@ -53,6 +52,58 @@ class RecipeScannerTests(unittest.TestCase):
                     ]
                 }]}
         self.assertEqual(best_title_from_pdf_page(FakePage()), "עוגת שוקולד עשירה")
+
+    def test_preprocess_downsamples_large_images_before_ocr(self):
+        image = Image.new("RGB", (6000, 4000), "white")
+        enhanced, threshold = preprocess_image(image)
+        try:
+            width, height = enhanced.size
+            self.assertLessEqual(max(width, height), MAX_OCR_EDGE)
+            self.assertLessEqual(width * height, MAX_OCR_PIXELS)
+            self.assertEqual(enhanced.mode, "L")
+        finally:
+            enhanced.close()
+            threshold.close()
+            image.close()
+
+    def test_good_first_pass_runs_only_one_ocr_variant(self):
+        class FakeOutput:
+            DICT = "dict"
+        fake = Mock()
+        fake.Output = FakeOutput
+        fake.image_to_data.return_value = {
+            "text": ["APPLE", "RECIPE"], "conf": ["96", "94"],
+            "left": ["10", "140"], "top": ["20", "20"],
+            "width": ["110", "120"], "height": ["42", "42"],
+            "block_num": ["1", "1"], "par_num": ["1", "1"], "line_num": ["1", "1"],
+        }
+        image = Image.new("RGB", (900, 400), "white")
+        try:
+            result = recognize_image(image, fake)
+        finally:
+            image.close()
+        self.assertIn("APPLE", result["text"])
+        self.assertEqual(fake.image_to_data.call_count, 1)
+
+    def test_low_confidence_first_pass_runs_one_retry(self):
+        class FakeOutput:
+            DICT = "dict"
+        fake = Mock()
+        fake.Output = FakeOutput
+        fake.image_to_data.side_effect = [
+            {"text": ["x"], "conf": ["5"], "left": ["1"], "top": ["1"], "width": ["1"], "height": ["1"],
+             "block_num": ["1"], "par_num": ["1"], "line_num": ["1"]},
+            {"text": ["עוגת", "תפוחים"], "conf": ["91", "92"], "left": ["10", "100"],
+             "top": ["20", "20"], "width": ["80", "90"], "height": ["35", "35"],
+             "block_num": ["1", "1"], "par_num": ["1", "1"], "line_num": ["1", "1"]},
+        ]
+        image = Image.new("RGB", (900, 400), "white")
+        try:
+            result = recognize_image(image, fake)
+        finally:
+            image.close()
+        self.assertIn("עוגת", result["text"])
+        self.assertEqual(fake.image_to_data.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -51,6 +51,35 @@ class בדיקותספרייה(unittest.TestCase):
             else:
                 os.environ["LOCALAPPDATA"] = previous
 
+    def test_הכנת_ייבוא_ברקע_ושמירה_במסד_בשלב_נפרד(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "מתכון.txt"
+                source.write_text(
+                    "עוגת תפוחים\nמצרכים:\n2 כוסות קמח\nאופן ההכנה:\nמערבבים ואופים",
+                    encoding="utf-8"
+                )
+                library = app.RecipeLibrary()
+                known = set()
+                prepared = library.prepare_import(source, "קינוחים/עוגות", known_digests=known)
+                self.assertIn(prepared["digest"], known)
+                self.assertEqual(prepared["safe_parts"], ["קינוחים", "עוגות"])
+                self.assertIn("2 כוסות קמח", prepared["recipe_data"]["ingredients"])
+                added, title = library.import_prepared(prepared)
+                self.assertTrue(added)
+                self.assertEqual(title, "עוגת תפוחים")
+                duplicate = library.prepare_import(source, known_digests=known)
+                self.assertTrue(duplicate["duplicate"])
+                self.assertFalse(library.import_prepared(duplicate)[0])
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
     def test_סוגי_קבצים_מוצגים_בעברית(self):
         self.assertEqual(app.file_kind(".png"), "תמונה")
         self.assertEqual(app.file_kind(".pdf"), "מסמך")

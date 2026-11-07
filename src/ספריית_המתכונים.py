@@ -24,6 +24,7 @@ from difflib import SequenceMatcher
 from html.parser import HTMLParser
 import tkinter as tk
 import threading
+import queue
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
 from recipe_center import RecipeCenter, recipe_search_text, compile_shopping_list, build_recipe_book_docx, export_recipe_book_pdf, parse_recipe_text, is_recipe_record, recipe_missing_parts
@@ -58,7 +59,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 TEXT_TYPES = {".txt", ".md", ".csv", ".tsv", ".log"}
 WORD_TYPES = {".doc", ".docx", ".docm", ".odt", ".rtf"}
@@ -70,33 +71,95 @@ DOCUMENT_TYPES = {".pdf", ".html", ".htm"} | OFFICE_TYPES | EBOOK_TYPES
 MAX_FILE_SIZE = 250 * 1024 * 1024
 MAX_TEXT_LENGTH = 400_000
 
-def find_libreoffice() -> Path | None:
-    """Find the bundled or system LibreOffice command-line executable."""
-    names = ("soffice.com", "soffice.exe")
-    roots = []
+def _extract_portable_libreoffice(archive_path: Path) -> Path | None:
+    """Extract the single bundled LibreOffice archive to local app data on first use."""
+    base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    runtime_root = base / APP_NAME / "רכיבים"
+    target = runtime_root / "LibreOffice"
+    for executable_name in ("soffice.com", "soffice.exe"):
+        existing = target / "program" / executable_name
+        if existing.is_file():
+            return existing
 
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix="LibreOffice-extract-", dir=runtime_root))
+    try:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            members = archive.infolist()
+            if len(members) > 30000:
+                raise ValueError("ארכיון LibreOffice מכיל מספר חריג של קבצים.")
+            total_size = sum(info.file_size for info in members)
+            if total_size > 3 * 1024 * 1024 * 1024:
+                raise ValueError("ארכיון LibreOffice גדול מהמגבלה המותרת.")
+            root_resolved = staging.resolve()
+            for info in members:
+                name = info.filename.replace("\\", "/")
+                parts = [part for part in name.split("/") if part not in ("", ".")]
+                if not parts or name.startswith("/") or any(part == ".." or ":" in part for part in parts):
+                    raise ValueError("ארכיון LibreOffice מכיל נתיב שאינו בטוח.")
+                destination = staging.joinpath(*parts)
+                if not destination.resolve().is_relative_to(root_resolved):
+                    raise ValueError("ארכיון LibreOffice מנסה לכתוב מחוץ לתיקיית החילוץ.")
+                if info.is_dir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    continue
+                if ((info.external_attr >> 16) & 0o170000) == 0o120000:
+                    raise ValueError("ארכיון LibreOffice מכיל קישור סמלי שאינו נתמך.")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info, "r") as source, destination.open("wb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+
+        executable = next(
+            (staging / "program" / name for name in ("soffice.com", "soffice.exe")
+             if (staging / "program" / name).is_file()),
+            None,
+        )
+        if executable is None:
+            raise ValueError("לא נמצא soffice בתוך ארכיון LibreOffice.")
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        os.replace(staging, target)
+        return next(
+            (target / "program" / name for name in ("soffice.com", "soffice.exe")
+             if (target / "program" / name).is_file()),
+            None,
+        )
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def find_libreoffice() -> Path | None:
+    """Find a folder, a portable ZIP archive, or a system LibreOffice installation."""
+    names = ("soffice.com", "soffice.exe")
+    roots: list[Path] = []
     if getattr(sys, "frozen", False):
         roots.append(Path(sys.executable).resolve().parent)
-    module_dir = Path(__file__).resolve().parent
-    roots.extend((module_dir, module_dir.parent))
-
-    program_files = os.environ.get("PROGRAMFILES")
-    if program_files:
-        roots.append(Path(program_files))
-    program_files_x86 = os.environ.get("PROGRAMFILES(X86)")
-    if program_files_x86:
-        roots.append(Path(program_files_x86))
+    bundle_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    roots.extend((bundle_dir, Path(__file__).resolve().parent, Path(__file__).resolve().parent.parent))
 
     for root in roots:
         for name in names:
             candidate = root / "LibreOffice" / "program" / name
             if candidate.is_file():
                 return candidate
-            candidate = root / "program" / name
-            if candidate.is_file() and candidate.parent.name.lower() == "program":
-                return candidate
 
-    for name in ("soffice.com", "soffice.exe", "soffice"):
+    # The distributed ZIP has only one LibreOffice.zip, not thousands of loose files.
+    for root in roots:
+        archive_path = root / "LibreOffice.zip"
+        if archive_path.is_file():
+            try:
+                return _extract_portable_libreoffice(archive_path)
+            except Exception:
+                return None
+
+    for root in (Path(os.environ.get("PROGRAMFILES", "C:/Program Files")),
+                 Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)"))):
+        for name in names:
+            candidate = root / "LibreOffice" / "program" / name
+            if candidate.is_file():
+                return candidate
+    for name in names + ("soffice",):
         located = shutil.which(name)
         if located:
             return Path(located)
@@ -337,7 +400,7 @@ def extract_text(path: Path) -> str:
                         import io
                         with Image.open(io.BytesIO(pix.tobytes("png"))) as page_image:
                             _LAST_OCR_TITLE = ""
-                            page_text = ocr_image(page_image.convert("RGB"))
+                            page_text = ocr_image(page_image)
                         if page_index == 0 and _LAST_OCR_TITLE:
                             first_page_title = _LAST_OCR_TITLE
                     pages.append(page_text)
@@ -364,7 +427,7 @@ def extract_text(path: Path) -> str:
             if Image is not None:
                 with Image.open(path) as image:
                     _LAST_OCR_TITLE = ""
-                    recognized = ocr_image(image.convert("RGB"))
+                    recognized = ocr_image(image)
             if _LAST_OCR_TITLE:
                 OCR_TITLE_CACHE[cache_key] = _LAST_OCR_TITLE
             text = "\n".join(part for part in (metadata, recognized) if part)
@@ -934,14 +997,24 @@ class RecipeLibrary:
         """, (int(item_id),)).fetchall()
         return [row["name"] for row in rows]
 
-    def import_one(self, source: Path, relative_folder: str = "") -> tuple[bool, str]:
+    def prepare_import(
+        self,
+        source: Path,
+        relative_folder: str = "",
+        known_digests: set[str] | None = None,
+    ) -> dict:
+        """Read/hash/parse a source file without touching SQLite; safe for a worker thread."""
+        source = Path(source).resolve()
         if not source.is_file():
-            return False, "זה אינו קובץ."
+            raise ValueError("זה אינו קובץ.")
         if source.stat().st_size > MAX_FILE_SIZE:
-            return False, "הקובץ גדול מדי. ניתן לייבא קבצים עד 250 מגה־בייט."
+            raise ValueError("הקובץ גדול מדי. ניתן לייבא קבצים עד 250 מגה־בייט.")
         digest = file_digest(source)
-        if self.db.execute("SELECT id FROM items WHERE digest=?", (digest,)).fetchone():
-            return False, "הקובץ כבר נמצא בספרייה."
+        if known_digests is not None:
+            if digest in known_digests:
+                return {"duplicate": True, "source": source, "digest": digest}
+            known_digests.add(digest)
+
         content = extract_text(source)
         title = choose_title(source, content)
         safe_parts = []
@@ -951,9 +1024,6 @@ class RecipeLibrary:
             cleaned = safe_title(part)
             if cleaned and cleaned not in (".", ".."):
                 safe_parts.append(cleaned)
-        target_folder = self.files_dir.joinpath(*safe_parts)
-        target_folder.mkdir(parents=True, exist_ok=True)
-        target = unique_path(target_folder, title, source.suffix.lower())
         parsed = parse_recipe_text(content)
         recipe_data = {
             "category": "/".join(safe_parts),
@@ -969,18 +1039,48 @@ class RecipeLibrary:
             "history": [],
             "versions": [],
         }
+        return {
+            "duplicate": False,
+            "source": source,
+            "digest": digest,
+            "content": content,
+            "title": title,
+            "safe_parts": safe_parts,
+            "recipe_data": recipe_data,
+        }
+
+    def import_prepared(self, prepared: dict) -> tuple[bool, str]:
+        """Commit a prepared item. This method must run on the UI/SQLite thread."""
+        if prepared.get("duplicate"):
+            return False, "הקובץ כבר נמצא בספרייה."
+        source = Path(prepared["source"])
+        digest = str(prepared["digest"])
+        if self.db.execute("SELECT id FROM items WHERE digest=?", (digest,)).fetchone():
+            return False, "הקובץ כבר נמצא בספרייה."
+        safe_parts = list(prepared.get("safe_parts") or [])
+        target_folder = self.files_dir.joinpath(*safe_parts)
+        target_folder.mkdir(parents=True, exist_ok=True)
+        title = safe_title(prepared.get("title") or source.stem)
+        target = unique_path(target_folder, title, source.suffix.lower())
         shutil.copy2(source, target)
         try:
             self.db.execute(
                 "INSERT INTO items(title,original_name,stored_path,extension,content,digest,imported_at,recipe_data) VALUES(?,?,?,?,?,?,?,?)",
-                (title, source.name, str(target), source.suffix.lower(), content, digest,
-                 datetime.now().strftime("%d/%m/%Y %H:%M"), json.dumps(recipe_data, ensure_ascii=False))
+                (title, source.name, str(target), source.suffix.lower(),
+                 str(prepared.get("content") or ""), digest,
+                 datetime.now().strftime("%d/%m/%Y %H:%M"),
+                 json.dumps(prepared.get("recipe_data") or {}, ensure_ascii=False))
             )
             self.db.commit()
         except Exception:
             target.unlink(missing_ok=True)
             raise
         return True, title
+
+    def import_one(self, source: Path, relative_folder: str = "") -> tuple[bool, str]:
+        prepared = self.prepare_import(source, relative_folder=relative_folder)
+        return self.import_prepared(prepared)
+
 
     def remove(self, item_id: int):
         row = self.db.execute("SELECT stored_path FROM items WHERE id=?", (item_id,)).fetchone()
@@ -1011,7 +1111,7 @@ class App:
                 self.root.iconbitmap(default=str(icon_path))
         except (tk.TclError, OSError):
             pass
-        self.root.geometry("1600x940")
+        self.root.geometry("1680x960")
         self.root.minsize(1120, 720)
         self.style = ttk.Style(self.root)
         self._apply_styles()
@@ -1026,6 +1126,7 @@ class App:
         self.nav_buttons = {}
         self.reader_photos = []
         self._scan_thread = None
+        self._import_cancel_event = None
         self.selected_item_id = None
         self.gallery_photos = []
         self.date_from_value = tk.StringVar()
@@ -1270,10 +1371,10 @@ class App:
         content_area = tk.Frame(workspace, bg=self.colors["background"])
         content_area.pack(fill="both", expand=True)
         self.reader_panel = tk.Frame(
-            content_area, bg=self.colors["surface"], width=370,
+            content_area, bg=self.colors["surface"], width=320,
             highlightbackground=self.colors["border"], highlightthickness=1
         )
-        self.reader_panel.pack(side="left", fill="y", padx=(0, 14))
+        self.reader_panel.pack(side="right", fill="y", padx=(14, 0))
         self.reader_panel.pack_propagate(False)
         reader_heading = tk.Frame(self.reader_panel, bg=self.colors["surface"], padx=16, pady=13)
         reader_heading.pack(fill="x")
@@ -1491,9 +1592,13 @@ class App:
             child.destroy()
         self.gallery_photos = []
         self.gallery_cards = {}
-        columns = 2
-        self.gallery_inner.grid_columnconfigure(0, weight=1, uniform="recipe-cards")
-        self.gallery_inner.grid_columnconfigure(1, weight=1, uniform="recipe-cards")
+        try:
+            available_width = max(1, self.gallery_canvas.winfo_width())
+        except tk.TclError:
+            available_width = 900
+        columns = 3 if available_width >= 820 else 2
+        for column in range(columns):
+            self.gallery_inner.grid_columnconfigure(column, weight=1, uniform="recipe-cards")
         if not ranked:
             empty = tk.Frame(self.gallery_inner, bg=self.colors["surface"], padx=20, pady=42)
             empty.grid(row=0, column=0, columnspan=columns, sticky="nsew", padx=18, pady=18)
@@ -2978,59 +3083,158 @@ class App:
             messagebox.showerror("שגיאה", f"לא ניתן לקרוא את הפריטים שנגררו.\n{exc}")
 
     def import_paths(self, paths, source_root: Path | None = None):
+        """Import folders without blocking Tk; OCR and hashing run in one background worker."""
         paths = [Path(path) for path in paths]
         if not paths:
             return
-        added, skipped, failed = 0, 0, 0
+
         home = self.library.home.resolve()
+        known_digests = {
+            str(row["digest"]) for row in self.library.db.execute("SELECT digest FROM items").fetchall()
+        }
+        results: queue.Queue = queue.Queue(maxsize=1)
+        cancel_event = threading.Event()
+        self._import_cancel_event = cancel_event
+        state = {"added": 0, "skipped": 0, "failed": 0, "processed": 0}
+
         progress_window = tk.Toplevel(self.root)
-        progress_window.title("ייבוא קבצים")
-        progress_window.geometry("460x150")
+        progress_window.title("ייבוא ספרייה")
+        progress_window.geometry("520x190")
+        progress_window.minsize(460, 180)
         progress_window.transient(self.root)
-        progress_window.protocol("WM_DELETE_WINDOW", lambda: None)
         progress_window.grab_set()
         frame = ttk.Frame(progress_window, padding=18, style="App.TFrame")
         frame.pack(fill="both", expand=True)
         progress_text = tk.StringVar(value=f"מכין לייבוא {len(paths)} קבצים…")
         ttk.Label(frame, textvariable=progress_text, style="Panel.TLabel", anchor="e").pack(fill="x", pady=(0, 10))
-        progress = ttk.Progressbar(frame, mode="determinate", maximum=len(paths), value=0)
-        progress.pack(fill="x")
-        progress_window.update_idletasks()
-        try:
-            for index, path in enumerate(paths, 1):
-                progress_text.set(f"קובץ {index} מתוך {len(paths)}: {path.name[:55]}")
-                progress.configure(value=index - 1)
-                progress_window.update_idletasks()
+        progress = ttk.Progressbar(frame, mode="determinate", maximum=max(1, len(paths)), value=0)
+        progress.pack(fill="x", pady=(0, 12))
+        counter = tk.StringVar(value=f"0 מתוך {len(paths)}")
+        ttk.Label(frame, textvariable=counter, style="Panel.TLabel", anchor="e").pack(fill="x")
+        buttons = ttk.Frame(frame, style="App.TFrame")
+        buttons.pack(fill="x", pady=(12, 0))
+        cancel_button = ttk.Button(buttons, text="ביטול ייבוא")
+        cancel_button.pack(side="left")
+
+        def request_cancel():
+            if not cancel_event.is_set():
+                cancel_event.set()
+                cancel_button.configure(state="disabled")
+                progress_text.set("מבטל… הקובץ הנוכחי יסיים עיבוד לפני העצירה.")
+        cancel_button.configure(command=request_cancel)
+        progress_window.protocol("WM_DELETE_WINDOW", request_cancel)
+
+        def publish_result(record, allow_after_cancel=False):
+            while True:
                 try:
-                    path = path.resolve()
-                    if home == path or home in path.parents:
-                        skipped += 1
-                    else:
-                        relative_folder = ""
-                        if source_root is not None:
-                            try:
-                                relative_folder = path.parent.relative_to(Path(source_root).resolve()).as_posix()
-                            except (ValueError, OSError):
-                                relative_folder = ""
-                        ok, _message = self.library.import_one(path, relative_folder=relative_folder)
-                        if ok:
-                            added += 1
+                    results.put(record, timeout=0.2)
+                    return
+                except queue.Full:
+                    if cancel_event.is_set() and not allow_after_cancel:
+                        return
+
+        def import_worker():
+            try:
+                for index, original_path in enumerate(paths, 1):
+                    if cancel_event.is_set():
+                        break
+                    try:
+                        path = original_path.resolve()
+                        if path == home or home in path.parents:
+                            record = {"index": index, "skip": True, "name": path.name}
                         else:
-                            skipped += 1
-                except Exception:
-                    failed += 1
-                progress.configure(value=index)
-                progress_window.update_idletasks()
-        finally:
+                            relative_folder = ""
+                            if source_root is not None:
+                                try:
+                                    relative_folder = path.parent.relative_to(Path(source_root).resolve()).as_posix()
+                                except (ValueError, OSError):
+                                    relative_folder = ""
+                            prepared = self.library.prepare_import(
+                                path, relative_folder=relative_folder, known_digests=known_digests
+                            )
+                            record = {
+                                "index": index,
+                                "skip": bool(prepared.get("duplicate")),
+                                "prepared": prepared,
+                                "name": path.name,
+                            }
+                    except Exception as exc:
+                        record = {"index": index, "error": str(exc), "name": original_path.name}
+                    publish_result(record)
+                publish_result({"done": True, "cancelled": cancel_event.is_set()}, allow_after_cancel=True)
+            except Exception as exc:
+                publish_result(
+                    {"done": True, "fatal_error": str(exc), "cancelled": cancel_event.is_set()},
+                    allow_after_cancel=True
+                )
+
+        worker = threading.Thread(target=import_worker, name="RecipeLibraryImport", daemon=True)
+        worker.start()
+
+        def finish_import(record=None):
             try:
                 progress_window.grab_release()
                 progress_window.destroy()
             except tk.TclError:
                 pass
-        self.refresh()
-        self.status_value.set(f"הייבוא הסתיים: {added} נוספו, {skipped} דולגו, {failed} נכשלו.")
-        if failed:
-            messagebox.showwarning("סיום ייבוא", f"נוספו {added} קבצים.\nדולגו {skipped} קבצים.\n{failed} קבצים לא נקלטו.")
+            self._import_cancel_event = None
+            self.refresh()
+            summary = (
+                f"הייבוא הסתיים: {state['added']} נוספו, "
+                f"{state['skipped']} דולגו, {state['failed']} נכשלו."
+            )
+            if cancel_event.is_set():
+                summary = (
+                    f"הייבוא הופסק: {state['added']} נוספו, "
+                    f"{state['skipped']} דולגו, {state['failed']} נכשלו."
+                )
+            self.status_value.set(summary)
+            if state["failed"] or (record and record.get("fatal_error")):
+                detail = f"{state['failed']} קבצים לא נקלטו."
+                if record and record.get("fatal_error"):
+                    detail += "\n" + str(record["fatal_error"])
+                messagebox.showwarning(
+                    "ייבוא הסתיים עם שגיאות",
+                    f"נוספו {state['added']} קבצים.\nדולגו {state['skipped']} קבצים.\n{detail}",
+                    parent=self.root,
+                )
+
+        def poll_results():
+            try:
+                record = results.get_nowait()
+            except queue.Empty:
+                if worker.is_alive():
+                    progress_window.after(120, poll_results)
+                else:
+                    finish_import()
+                return
+
+            if record.get("done"):
+                finish_import(record)
+                return
+
+            state["processed"] += 1
+            if record.get("error"):
+                state["failed"] += 1
+            elif record.get("skip"):
+                state["skipped"] += 1
+            else:
+                try:
+                    added, _message = self.library.import_prepared(record["prepared"])
+                    if added:
+                        state["added"] += 1
+                    else:
+                        state["skipped"] += 1
+                except Exception:
+                    state["failed"] += 1
+
+            progress.configure(value=state["processed"])
+            counter.set(f"{state['processed']} מתוך {len(paths)}")
+            progress_text.set(f"מעבד: {record.get('name', '')[:65]}")
+            progress_window.after(20, poll_results)
+
+        progress_window.after(100, poll_results)
+
 
     def open_selected(self):
         row = self.selected_row()
@@ -3374,6 +3578,14 @@ class App:
         ttk.Button(buttons, text="סגירה", command=dialog.destroy).pack(side="left")
 
     def close(self):
+        active_import = getattr(self, "_import_cancel_event", None)
+        if active_import is not None:
+            active_import.set()
+            messagebox.showinfo(
+                "ייבוא פעיל",
+                "הייבוא מתבטל. אפשר לסגור את התוכנה לאחר שהקובץ הנוכחי יסיים עיבוד."
+            )
+            return
         try:
             if self._auto_backup_job is not None:
                 try:
