@@ -202,7 +202,7 @@ def recognize_image(image, pytesseract_module=None) -> dict[str, Any]:
             attempts.append(first)
         retry_needed = (
             first is None
-            or len(re.sub(r"\s+", "", first["text"])) < 12
+            or (len(re.sub(r"\s+", "", first["text"])) < 8 and first["confidence"] < 60)
             or first["confidence"] < 30
             or not first["title"]
         )
