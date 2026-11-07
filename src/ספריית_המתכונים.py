@@ -23,9 +23,11 @@ from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from html.parser import HTMLParser
 import tkinter as tk
+import threading
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
 from recipe_center import RecipeCenter, recipe_search_text, compile_shopping_list, build_recipe_book_docx, export_recipe_book_pdf, parse_recipe_text, is_recipe_record, recipe_missing_parts
+from recipe_scanner import recognize_image, best_title_from_pdf_page
 
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -47,7 +49,7 @@ try:
 except Exception:
     rtf_to_text = None
 try:
-    from PIL import Image, ImageTk, ExifTags
+    from PIL import Image, ImageTk, ExifTags, ImageOps
 except Exception:
     Image = ImageTk = ExifTags = None
 try:
@@ -56,7 +58,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 TEXT_TYPES = {".txt", ".md", ".csv", ".tsv", ".log"}
 WORD_TYPES = {".doc", ".docx", ".docm", ".odt", ".rtf"}
@@ -184,17 +186,21 @@ def configure_ocr():
             return True
     return False
 
+OCR_TITLE_CACHE: dict[str, str] = {}
+OCR_FILE_CACHE: dict[str, dict] = {}
+_LAST_OCR_TITLE = ""
+
+
 def ocr_image(image) -> str:
+    """Improved local OCR with a title candidate derived from printed text size."""
+    global _LAST_OCR_TITLE
+    _LAST_OCR_TITLE = ""
     if pytesseract is None:
         return ""
-    try:
-        configure_ocr()
-        return pytesseract.image_to_string(image, lang="heb+eng", config="--psm 6", timeout=60)
-    except Exception:
-        try:
-            return pytesseract.image_to_string(image, lang="eng", config="--psm 6", timeout=60)
-        except Exception:
-            return ""
+    result = recognize_image(image, pytesseract)
+    _LAST_OCR_TITLE = str(result.get("title") or "")
+    return str(result.get("text") or "")
+
 
 def data_home() -> Path:
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
@@ -302,7 +308,15 @@ def image_description(path: Path) -> str:
     return ""
 
 def extract_text(path: Path) -> str:
+    global _LAST_OCR_TITLE
     suffix = path.suffix.lower()
+    cache_key = str(path.resolve())
+    cached = OCR_FILE_CACHE.pop(cache_key, None)
+    if cached:
+        if cached.get("title"):
+            OCR_TITLE_CACHE[cache_key] = str(cached["title"])
+        return str(cached.get("text") or "")[:MAX_TEXT_LENGTH]
+    OCR_TITLE_CACHE.pop(cache_key, None)
     try:
         if suffix in TEXT_TYPES:
             text = decode_text(path.read_bytes())
@@ -313,13 +327,22 @@ def extract_text(path: Path) -> str:
         elif suffix == ".pdf" and fitz is not None:
             with fitz.open(path) as pdf:
                 pages = []
-                for page in pdf:
+                first_page_title = ""
+                for page_index, page in enumerate(pdf):
                     page_text = page.get_text("text").strip()
+                    if page_index == 0:
+                        first_page_title = best_title_from_pdf_page(page)
                     if not page_text and Image is not None:
-                        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                        pix = page.get_pixmap(matrix=fitz.Matrix(2.2, 2.2), alpha=False)
                         import io
-                        page_text = ocr_image(Image.open(io.BytesIO(pix.tobytes("png"))))
+                        with Image.open(io.BytesIO(pix.tobytes("png"))) as page_image:
+                            _LAST_OCR_TITLE = ""
+                            page_text = ocr_image(page_image.convert("RGB"))
+                        if page_index == 0 and _LAST_OCR_TITLE:
+                            first_page_title = _LAST_OCR_TITLE
                     pages.append(page_text)
+                if first_page_title:
+                    OCR_TITLE_CACHE[cache_key] = first_page_title
                 text = "\n".join(pages)
         elif suffix in EBOOK_TYPES and fitz is not None:
             with fitz.open(path) as ebook:
@@ -340,15 +363,30 @@ def extract_text(path: Path) -> str:
             recognized = ""
             if Image is not None:
                 with Image.open(path) as image:
+                    _LAST_OCR_TITLE = ""
                     recognized = ocr_image(image.convert("RGB"))
-            text = "\\n".join(part for part in (metadata, recognized) if part)
+            if _LAST_OCR_TITLE:
+                OCR_TITLE_CACHE[cache_key] = _LAST_OCR_TITLE
+            text = "\n".join(part for part in (metadata, recognized) if part)
         else:
             text = ""
     except Exception:
         text = ""
     return (text or "")[:MAX_TEXT_LENGTH]
 
+
 def choose_title(path: Path, content: str) -> str:
+    cache_key = str(path.resolve())
+    visual_title = OCR_TITLE_CACHE.pop(cache_key, "")
+    if not visual_title and path.suffix.lower() in IMAGE_TYPES and Image is not None and pytesseract is not None:
+        try:
+            with Image.open(path) as image:
+                visual_title = str(recognize_image(image.convert("RGB"), pytesseract).get("title") or "")
+        except Exception:
+            visual_title = ""
+    if visual_title:
+        return safe_title(visual_title)
+
     lines = [re.sub(r"\s+", " ", line).strip(" \t#*-•") for line in (content or "").splitlines()]
     for line in lines[:35]:
         line = re.sub(r"^(?:כותרת|שם המתכון|מתכון)\s*[:：-]\s*", "", line, flags=re.I)
@@ -357,6 +395,7 @@ def choose_title(path: Path, content: str) -> str:
                 return safe_title(line)
     metadata = image_description(path) if path.suffix.lower() in IMAGE_TYPES else ""
     return safe_title(metadata or path.stem)
+
 
 def file_kind(suffix: str) -> str:
     suffix = (suffix or "").lower()
@@ -972,8 +1011,8 @@ class App:
                 self.root.iconbitmap(default=str(icon_path))
         except (tk.TclError, OSError):
             pass
-        self.root.geometry("1400x880")
-        self.root.minsize(1080, 700)
+        self.root.geometry("1600x940")
+        self.root.minsize(1120, 720)
         self.style = ttk.Style(self.root)
         self._apply_styles()
         self.search_value = tk.StringVar()
@@ -982,15 +1021,17 @@ class App:
         self.category_filter_value = tk.StringVar(value="כל הקטגוריות")
         self.tag_filter_value = tk.StringVar(value="כל התגיות")
         self.sort_value = tk.StringVar(value="תאריך: חדש לישן")
-        self.view_mode = tk.StringVar(value=self.library.get_setting("view_mode", "רשימה"))
-        if self.view_mode.get() not in ("רשימה", "גלריה"):
-            self.view_mode.set("רשימה")
+        self.view_mode = tk.StringVar(value="גלריה")
+        self.current_page = "recipes"
+        self.nav_buttons = {}
+        self.reader_photos = []
+        self._scan_thread = None
         self.selected_item_id = None
         self.gallery_photos = []
         self.date_from_value = tk.StringVar()
         self.date_to_value = tk.StringVar()
         self.folder_filter_value = tk.StringVar(value="כל התיקיות")
-        self.recipe_filter_value = tk.StringVar(value="כל הפריטים")
+        self.recipe_filter_value = tk.StringVar(value="מתכונים בלבד")
         self._filter_options = {}
         self.favorite_button = None
         self.preview_temp_directory = None
@@ -1016,8 +1057,11 @@ class App:
 
     def _apply_styles(self):
         """Apply a modern, high-contrast desktop theme."""
-        theme = self.library.get_setting("color_theme", "כחול")
+        theme = self.library.get_setting("color_theme", "שמנת")
         palettes = {
+            "שמנת": ("#F5F1E9", "#FFFFFF", "#293B32", "#344E40", "#26372F", "#78847B", "#E5DED2", "#B9774E", "#9E633E", "#FBF8F2", "#F4E6DA", "#B84E52"),
+            "מרווה": ("#EEF3ED", "#FFFFFF", "#294238", "#365646", "#293B31", "#718177", "#DCE5DB", "#77977D", "#617E66", "#F7FAF6", "#E5EEE4", "#B84E52"),
+            "לילה": ("#17201C", "#222D27", "#EAF0E9", "#1D2A23", "#EAF0E9", "#A5B1A7", "#39473E", "#A5C18F", "#89A978", "#26332C", "#35493B", "#E18D8D"),
             "כחול": ("#EEF3F9", "#FFFFFF", "#172A45", "#10243D", "#25364D", "#718198", "#DCE5EF", "#087E8B", "#066571", "#F5F8FC", "#DCEFF2", "#B83E4B"),
             "ירוק": ("#EFF6F3", "#FFFFFF", "#173E35", "#12362F", "#25443D", "#72877F", "#D8E7E0", "#16846D", "#116B58", "#F4F9F6", "#DDEFE7", "#B83E4B"),
             "סגול": ("#F3F0F8", "#FFFFFF", "#33274D", "#261C3C", "#3D3450", "#80758F", "#E2DCEC", "#7655A6", "#61438D", "#F8F6FB", "#EAE2F5", "#B83E4B"),
@@ -1025,6 +1069,11 @@ class App:
         values = palettes.get(theme, palettes["כחול"])
         names = ("background", "surface", "navy", "hero", "text", "muted", "border", "accent", "accent_hover", "row_alt", "selected", "danger")
         self.colors = dict(zip(names, values))
+        self.colors.update({
+            "sidebar": "#20372D" if theme != "לילה" else "#101814",
+            "sidebar_active": "#355644" if theme != "לילה" else "#344C3B",
+            "cover": "#E9E1D3" if theme == "שמנת" else ("#DDE9DD" if theme == "מרווה" else "#2D3C33"),
+        })
         try:
             font_size = max(8, min(15, int(self.library.get_setting("font_size", "10"))))
         except ValueError:
@@ -1103,215 +1152,169 @@ class App:
         )
 
     def _build(self):
-        outer = ttk.Frame(self.root, padding=(22, 18, 22, 14), style="App.TFrame")
-        outer.pack(fill="both", expand=True)
+        """Build the recipe-first workspace with compact RTL navigation."""
+        self.shell = tk.Frame(self.root, bg=self.colors["background"], bd=0)
+        self.shell.pack(fill="both", expand=True)
 
-        # Hero header
-        hero = tk.Frame(outer, background=self.colors["hero"], height=142, bd=0, highlightthickness=0)
-        hero.pack(fill="x", pady=(0, 15))
-        hero.pack_propagate(False)
-        hero_text = tk.Frame(hero, background=self.colors["hero"])
-        hero_text.pack(side="right", fill="both", expand=True, padx=(24, 28), pady=19)
-        tk.Label(
-            hero_text, text="הספרייה האישית שלך",
-            background=self.colors["hero"], foreground="#9EDBD7",
-            font=("Segoe UI", 10, "bold"), anchor="e"
-        ).pack(fill="x")
-        tk.Label(
-            hero_text, text=APP_NAME,
-            background=self.colors["hero"], foreground="#FFFFFF",
-            font=("Segoe UI", 27, "bold"), anchor="e"
-        ).pack(fill="x", pady=(2, 1))
-        tk.Label(
-            hero_text, text="כל המתכונים, המסמכים והתמונות שלך — מסודרים ונגישים במקום אחד",
-            background=self.colors["hero"], foreground="#C5D2E2",
+        sidebar = tk.Frame(self.shell, bg=self.colors["sidebar"], width=218, bd=0)
+        sidebar.pack(side="right", fill="y")
+        sidebar.pack_propagate(False)
+        brand = tk.Frame(sidebar, bg=self.colors["sidebar"], padx=18, pady=24)
+        brand.pack(fill="x")
+        tk.Label(brand, text="✦", bg=self.colors["sidebar"], fg="#E3B78E",
+                 font=("Segoe UI Symbol", 24, "bold"), anchor="e").pack(fill="x")
+        tk.Label(brand, text="ספריית המתכונים", bg=self.colors["sidebar"], fg="#FFFFFF",
+                 font=("Segoe UI", 15, "bold"), anchor="e").pack(fill="x", pady=(5, 1))
+        tk.Label(brand, text=f"גרסה {APP_VERSION}", bg=self.colors["sidebar"], fg="#B5C5BA",
+                 font=("Segoe UI", 9), anchor="e").pack(fill="x")
+        tk.Frame(sidebar, bg="#496353", height=1).pack(fill="x", padx=18, pady=(2, 12))
+        self.nav_buttons = {}
+        for key, glyph, label in [
+            ("recipes", "▦", "המתכונים שלי"),
+            ("favorites", "★", "מועדפים"),
+            ("files", "▤", "כל הקבצים"),
+        ]:
+            self._add_nav_button(sidebar, key, glyph, label)
+        tk.Label(sidebar, text="כלים", bg=self.colors["sidebar"], fg="#9CB0A2",
+                 font=("Segoe UI", 9, "bold"), anchor="e", padx=22).pack(fill="x", pady=(22, 6))
+        for key, glyph, label in [
+            ("scanner", "⌕", "סריקת מתכון חכמה"),
+            ("center", "◉", "מרכז המתכונים"),
+            ("import", "＋", "הוספת קבצים"),
+            ("folder", "▣", "ייבוא תיקייה"),
+            ("backup", "↥", "גיבוי ושחזור"),
+            ("recycle", "♻", "סל המחזור"),
+            ("settings", "⚙", "הגדרות ועיצוב"),
+        ]:
+            self._add_nav_button(sidebar, key, glyph, label)
+        tk.Frame(sidebar, bg="#496353", height=1).pack(fill="x", padx=18, pady=(16, 10))
+        tk.Label(sidebar, text="עובדת מקומית\nהקבצים נשארים במחשב שלך",
+                 bg=self.colors["sidebar"], fg="#B5C5BA", font=("Segoe UI", 9),
+                 justify="right", anchor="e", padx=20).pack(side="bottom", fill="x", pady=20)
+
+        workspace = tk.Frame(self.shell, bg=self.colors["background"], padx=24, pady=20)
+        workspace.pack(side="left", fill="both", expand=True)
+        header = tk.Frame(workspace, bg=self.colors["background"])
+        header.pack(fill="x", pady=(0, 14))
+        heading = tk.Frame(header, bg=self.colors["background"])
+        heading.pack(side="right", fill="x", expand=True)
+        self.page_title_label = tk.Label(
+            heading, text="המתכונים שלי", bg=self.colors["background"],
+            fg=self.colors["navy"], font=("Segoe UI", 25, "bold"), anchor="e"
+        )
+        self.page_title_label.pack(fill="x")
+        self.page_subtitle_label = tk.Label(
+            heading, text="כל המתכונים שלך במקום אחד. בוחרים מתכון ומתחילים לקרוא.",
+            bg=self.colors["background"], fg=self.colors["muted"],
             font=("Segoe UI", 10), anchor="e"
-        ).pack(fill="x")
-
-        offline_badge = tk.Frame(hero, background="#1D3A57", highlightbackground="#31536F", highlightthickness=1)
-        offline_badge.pack(side="left", padx=25, pady=34)
-        tk.Label(
-            offline_badge, text="●  עובדת ללא אינטרנט",
-            background="#1D3A57", foreground="#B8F0E7",
-            font=("Segoe UI", 10, "bold"), padx=15, pady=12
-        ).pack()
-        tk.Frame(hero, background=self.colors["accent"], height=4, bd=0).pack(side="bottom", fill="x")
-
-        # Search card
-        search_frame = ttk.Frame(outer, padding=(14, 12), style="Card.TFrame")
-        search_frame.pack(fill="x", pady=(0, 10))
-        ttk.Label(search_frame, text="חיפוש בספרייה", style="Section.TLabel").pack(side="right", padx=(10, 14))
-        entry = ttk.Entry(search_frame, textvariable=self.search_value, justify="right")
-        self.search_entry = entry
-        entry.pack(side="right", fill="x", expand=True, padx=5)
-        entry.bind("<KeyRelease>", lambda _event: self.refresh())
-        ttk.Button(
-            search_frame, text="ניקוי חיפוש",
-            command=lambda: self.search_value.set("") or self.refresh()
-        ).pack(side="left", padx=(5, 0))
-
-        # Main actions
-        toolbar = ttk.Frame(outer, style="App.TFrame")
-        toolbar.pack(fill="x", pady=(0, 12))
-        actions = [
-            ("＋  הוספת קבצים", self.add_files),
-            ("▣  ייבוא תיקייה", self.add_folder),
-            ("📚  מרכז המתכונים", self.open_recipe_center),
-            ("▤  פתיחת תיקיית הנתונים", self.open_data_folder),
-            ("↥  יצירת גיבוי", self.backup),
-            ("♻  סל מחזור", self.open_recycle_bin),
-            ("⚙  הגדרות", self.settings),
-        ]
-        for label, command in actions:
-            style = "Primary.TButton" if label.startswith("＋") else "TButton"
-            ttk.Button(toolbar, text=label, command=command, style=style).pack(side="right", padx=(0, 7))
-
-        # Quick filters for the entire library, favorites, and personal collections.
-        filter_frame = ttk.Frame(outer, padding=(12, 9), style="Card.TFrame")
-        filter_frame.pack(fill="x", pady=(0, 12))
-        ttk.Label(filter_frame, text="הצגת קבצים:", style="Panel.TLabel").pack(side="right", padx=(0, 10))
-        self.filter_combo = ttk.Combobox(
-            filter_frame, textvariable=self.filter_value,
-            state="readonly", width=30, justify="right"
         )
-        self.filter_combo.pack(side="right", padx=4)
-        self.filter_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
-        self.type_combo = ttk.Combobox(
-            filter_frame, textvariable=self.type_filter_value,
-            state="readonly", width=12, justify="right",
-            values=["כל הסוגים", "תמונה", "מסמך", "גיליון", "מצגת", "ספר דיגיטלי", "קובץ"]
+        self.page_subtitle_label.pack(fill="x", pady=(2, 0))
+        self.count_label = tk.Label(
+            header, text="", bg=self.colors["background"], fg=self.colors["muted"],
+            font=("Segoe UI", 10, "bold"), anchor="e"
         )
-        self.type_combo.pack(side="right", padx=4)
-        self.type_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
-        self.category_combo = ttk.Combobox(
-            filter_frame, textvariable=self.category_filter_value,
-            state="readonly", width=15, justify="right"
-        )
-        self.category_combo.pack(side="right", padx=4)
-        self.category_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
-        self.tag_combo = ttk.Combobox(
-            filter_frame, textvariable=self.tag_filter_value,
-            state="readonly", width=12, justify="right"
-        )
-        self.tag_combo.pack(side="right", padx=4)
-        self.tag_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
-        self.sort_combo = ttk.Combobox(
-            filter_frame, textvariable=self.sort_value,
-            state="readonly", width=18, justify="right",
-            values=["תאריך: חדש לישן", "תאריך: ישן לחדש", "שם: א-ת", "שם: ת-א", "סוג קובץ", "גודל: גדול לקטן", "דירוג: גבוה לנמוך", "נצפו לאחרונה"]
-        )
-        self.sort_combo.pack(side="right", padx=4)
-        self.sort_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
-        ttk.Button(
-            filter_frame, text="📁  ניהול אוספים",
-            command=self.open_collections_dialog
-        ).pack(side="left", padx=(4, 0))
+        self.count_label.pack(side="left", padx=(12, 0))
 
-        detail_filter_frame = ttk.Frame(outer, padding=(12, 7), style="Card.TFrame")
-        detail_filter_frame.pack(fill="x", pady=(0, 10))
-        ttk.Label(detail_filter_frame, text="תיקייה:", style="Panel.TLabel").pack(side="right", padx=(0, 4))
-        self.folder_combo = ttk.Combobox(detail_filter_frame, textvariable=self.folder_filter_value, state="readonly", width=25, justify="right", values=["כל התיקיות"])
-        self.folder_combo.pack(side="right", padx=4)
-        self.folder_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
-        ttk.Label(detail_filter_frame, text="סוג פריטים:", style="Panel.TLabel").pack(side="right", padx=(10, 4))
-        self.recipe_filter_combo = ttk.Combobox(detail_filter_frame, textvariable=self.recipe_filter_value, state="readonly", width=21, justify="right", values=["כל הפריטים", "מתכונים בלבד", "מסמכים וקבצים", "מתכונים חסרים"])
-        self.recipe_filter_combo.pack(side="right", padx=4)
-        self.recipe_filter_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
-        ttk.Button(detail_filter_frame, text="בחירה מרובה / שינוי לקבוצה", command=self.manage_multiple_items).pack(side="left", padx=4)
-
-        date_frame = ttk.Frame(outer, padding=(12, 7), style="Card.TFrame")
-        date_frame.pack(fill="x", pady=(0, 10))
-        ttk.Label(date_frame, text="מתאריך:", style="Panel.TLabel").pack(side="right", padx=(0, 4))
-        self.date_from_entry = ttk.Entry(date_frame, textvariable=self.date_from_value, width=11, justify="center")
-        self.date_from_entry.pack(side="right", padx=3)
-        ttk.Label(date_frame, text="עד תאריך:", style="Panel.TLabel").pack(side="right", padx=(6, 3))
-        self.date_to_entry = ttk.Entry(date_frame, textvariable=self.date_to_value, width=11, justify="center")
-        self.date_to_entry.pack(side="right", padx=3)
-        self.date_from_entry.bind("<Return>", lambda _event: self.refresh())
-        self.date_to_entry.bind("<Return>", lambda _event: self.refresh())
-        ttk.Button(date_frame, text="החל תאריכים", command=self.refresh).pack(side="right", padx=4)
-        ttk.Button(date_frame, text="ניקוי תאריכים", command=self._clear_date_filters).pack(side="right", padx=4)
-        ttk.Button(date_frame, text="בדיקת כפילויות", command=self.show_duplicate_candidates).pack(side="left", padx=4)
-        ttk.Button(date_frame, text="שחזור מגיבוי", command=self.restore_backup).pack(side="left", padx=4)
-
-        # Resizable work area: preview on the left, file list on the right.
-        body = ttk.Frame(outer, style="App.TFrame")
-        body.pack(fill="both", expand=True)
-        paned = tk.PanedWindow(
-            body, orient="horizontal", background=self.colors["background"],
-            sashwidth=8, sashrelief="flat", sashpad=2, bd=0, relief="flat"
+        search_card = tk.Frame(
+            workspace, bg=self.colors["surface"],
+            highlightbackground=self.colors["border"], highlightthickness=1
         )
-        paned.pack(fill="both", expand=True)
-
-        preview = ttk.Frame(paned, padding=16, style="Card.TFrame")
-        preview.configure(width=490)
-        ttk.Label(preview, text="תצוגה מקדימה", style="Section.TLabel").pack(anchor="e", fill="x")
-        ttk.Label(
-            preview, text="בחרו תמונה מהרשימה כדי לראות אותה כאן בגודל גדול",
-            style="Muted.TLabel"
-        ).pack(anchor="e", fill="x", pady=(2, 10))
-
-        self.preview_image = tk.Canvas(
-            preview, background="#F2F6FA",
-            highlightthickness=1, highlightbackground="#E3EAF2",
-            bd=0, relief="flat"
-        )
-        self.preview_image.pack(fill="both", expand=True, pady=(0, 10))
-        self.preview_image.bind("<Configure>", self._schedule_preview_resize)
-        self._set_preview_placeholder("בחרו תמונה או קובץ מהרשימה")
-
-        self.detail_label = ttk.Label(
-            preview, text="", style="Muted.TLabel",
-            justify="right", anchor="e", wraplength=430
-        )
-        self.detail_label.pack(fill="x", pady=(0, 9))
-        selection_tools = ttk.Frame(preview, style="Card.TFrame")
-        selection_tools.pack(fill="x", pady=(0, 7))
-        self.favorite_button = ttk.Button(
-            selection_tools, text="☆ הוספה למועדפים",
-            command=self.toggle_favorite
-        )
-        self.favorite_button.pack(side="right", fill="x", expand=True, padx=(0, 4))
-        ttk.Button(
-            selection_tools, text="📁 שיוך לאוספים",
-            command=self.open_collections_dialog
-        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
-        ttk.Button(
-            preview, text="תצוגת מתכון מקצועית  ✎",
-            command=self.edit_recipe, style="Primary.TButton"
-        ).pack(fill="x", pady=(0, 7))
-        ttk.Button(
-            preview, text="הדפסת מתכון / חוברת PDF  🖨",
-            command=self.print_selected_recipe
-        ).pack(fill="x", pady=(0, 7))
-        ttk.Button(
-            preview, text="פתיחת הקובץ  ↗", command=self.open_selected
-        ).pack(fill="x", pady=(0, 7))
-        preview_actions = ttk.Frame(preview, style="Card.TFrame")
-        preview_actions.pack(fill="x")
-        ttk.Button(preview_actions, text="שינוי שם", command=self.rename_selected).pack(side="right", fill="x", expand=True, padx=(0, 4))
-        ttk.Button(
-            preview_actions, text="הסרה מהספרייה",
-            command=self.delete_selected, style="Danger.TButton"
-        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
-
-        table_card = ttk.Frame(paned, padding=14, style="Card.TFrame")
-        table_card.configure(width=790)
-        table_header = ttk.Frame(table_card, style="Card.TFrame")
-        table_header.pack(fill="x", pady=(0, 10))
-        ttk.Label(table_header, text="הקבצים שלך", style="Section.TLabel").pack(side="right")
-        ttk.Label(
-            table_header, text="בחרו פריט כדי להציג פרטים ותצוגה מקדימה",
-            style="Muted.TLabel"
+        search_card.pack(fill="x", pady=(0, 12))
+        search_inner = tk.Frame(search_card, bg=self.colors["surface"], padx=14, pady=11)
+        search_inner.pack(fill="x")
+        tk.Label(search_inner, text="⌕", bg=self.colors["surface"], fg=self.colors["accent"],
+                 font=("Segoe UI Symbol", 19), width=2).pack(side="right")
+        self.search_entry = ttk.Entry(search_inner, textvariable=self.search_value, justify="right")
+        self.search_entry.pack(side="right", fill="x", expand=True, ipady=3, padx=(4, 10))
+        self.search_entry.bind("<KeyRelease>", lambda _event: self.refresh())
+        tk.Button(
+            search_inner, text="ניקוי", command=lambda: (self.search_value.set(""), self.refresh()),
+            bg=self.colors["row_alt"], fg=self.colors["navy"], activebackground=self.colors["selected"],
+            relief="flat", bd=0, padx=14, pady=7, cursor="hand2", font=("Segoe UI", 9)
         ).pack(side="left")
-        view_switch = ttk.Frame(table_header, style="Card.TFrame")
-        view_switch.pack(side="left", padx=(0, 12))
-        ttk.Radiobutton(view_switch, text="☷ רשימה", value="רשימה", variable=self.view_mode, command=self.change_view_mode).pack(side="right", padx=3)
-        ttk.Radiobutton(view_switch, text="▦ גלריה", value="גלריה", variable=self.view_mode, command=self.change_view_mode).pack(side="right", padx=3)
 
-        table_body = ttk.Frame(table_card, style="Card.TFrame")
-        table_body.pack(fill="both", expand=True)
-        self.list_container = ttk.Frame(table_body, style="Card.TFrame")
+        filter_bar = tk.Frame(workspace, bg=self.colors["background"])
+        filter_bar.pack(fill="x", pady=(0, 12))
+        tk.Label(filter_bar, text="קטגוריה", bg=self.colors["background"], fg=self.colors["muted"],
+                 font=("Segoe UI", 9)).pack(side="right", padx=(0, 6))
+        self.category_combo = ttk.Combobox(
+            filter_bar, textvariable=self.category_filter_value,
+            state="readonly", width=20, justify="right"
+        )
+        self.category_combo.pack(side="right", padx=(0, 14))
+        self.category_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
+        tk.Label(filter_bar, text="מיון", bg=self.colors["background"], fg=self.colors["muted"],
+                 font=("Segoe UI", 9)).pack(side="right", padx=(0, 6))
+        self.sort_combo = ttk.Combobox(
+            filter_bar, textvariable=self.sort_value, state="readonly", width=19,
+            justify="right", values=[
+                "תאריך: חדש לישן", "תאריך: ישן לחדש", "שם: א-ת", "שם: ת-א",
+                "דירוג: גבוה לנמוך", "נצפו לאחרונה", "סוג קובץ", "גודל: גדול לקטן"
+            ]
+        )
+        self.sort_combo.pack(side="right")
+        self.sort_combo.bind("<<ComboboxSelected>>", self._on_filter_change)
+        self.view_all_button = tk.Button(
+            filter_bar, text="תצוגת רשימה  ☷", command=lambda: self._set_view("רשימה"),
+            bg=self.colors["row_alt"], fg=self.colors["navy"], activebackground=self.colors["selected"],
+            relief="flat", bd=0, padx=12, pady=7, cursor="hand2", font=("Segoe UI", 9)
+        )
+        self.view_all_button.pack(side="left")
+        self.view_grid_button = tk.Button(
+            filter_bar, text="תצוגת כרטיסים  ▦", command=lambda: self._set_view("גלריה"),
+            bg=self.colors["row_alt"], fg=self.colors["navy"], activebackground=self.colors["selected"],
+            relief="flat", bd=0, padx=12, pady=7, cursor="hand2", font=("Segoe UI", 9)
+        )
+        self.view_grid_button.pack(side="left", padx=(0, 6))
+
+        content_area = tk.Frame(workspace, bg=self.colors["background"])
+        content_area.pack(fill="both", expand=True)
+        self.reader_panel = tk.Frame(
+            content_area, bg=self.colors["surface"], width=370,
+            highlightbackground=self.colors["border"], highlightthickness=1
+        )
+        self.reader_panel.pack(side="left", fill="y", padx=(0, 14))
+        self.reader_panel.pack_propagate(False)
+        reader_heading = tk.Frame(self.reader_panel, bg=self.colors["surface"], padx=16, pady=13)
+        reader_heading.pack(fill="x")
+        tk.Label(reader_heading, text="קריאת המתכון", bg=self.colors["surface"],
+                 fg=self.colors["navy"], font=("Segoe UI", 14, "bold"), anchor="e").pack(fill="x")
+        tk.Label(reader_heading, text="בחרו כרטיס כדי להציג את הפרטים כאן",
+                 bg=self.colors["surface"], fg=self.colors["muted"],
+                 font=("Segoe UI", 9), anchor="e").pack(fill="x", pady=(2, 0))
+        reader_canvas_frame = tk.Frame(self.reader_panel, bg=self.colors["surface"])
+        reader_canvas_frame.pack(fill="both", expand=True, padx=(8, 4), pady=(0, 8))
+        self.reader_canvas = tk.Canvas(reader_canvas_frame, bg=self.colors["surface"], highlightthickness=0, bd=0)
+        reader_scroll = ttk.Scrollbar(reader_canvas_frame, orient="vertical", command=self.reader_canvas.yview)
+        self.reader_canvas.configure(yscrollcommand=reader_scroll.set)
+        reader_scroll.pack(side="left", fill="y")
+        self.reader_canvas.pack(side="right", fill="both", expand=True)
+        self.reader_inner = tk.Frame(self.reader_canvas, bg=self.colors["surface"])
+        self.reader_window = self.reader_canvas.create_window((0, 0), window=self.reader_inner, anchor="nw")
+        self.reader_inner.bind("<Configure>", lambda _event: self.reader_canvas.configure(scrollregion=self.reader_canvas.bbox("all")))
+        self.reader_canvas.bind("<Configure>", lambda event: self.reader_canvas.itemconfigure(self.reader_window, width=event.width))
+
+        catalog = tk.Frame(
+            content_area, bg=self.colors["surface"],
+            highlightbackground=self.colors["border"], highlightthickness=1
+        )
+        catalog.pack(side="left", fill="both", expand=True)
+        catalog_header = tk.Frame(catalog, bg=self.colors["surface"], padx=16, pady=13)
+        catalog_header.pack(fill="x")
+        self.catalog_title = tk.Label(
+            catalog_header, text="כל המתכונים", bg=self.colors["surface"],
+            fg=self.colors["navy"], font=("Segoe UI", 14, "bold"), anchor="e"
+        )
+        self.catalog_title.pack(side="right")
+        self.catalog_hint = tk.Label(
+            catalog_header, text="לחצו על מתכון כדי לקרוא אותו",
+            bg=self.colors["surface"], fg=self.colors["muted"], font=("Segoe UI", 9), anchor="w"
+        )
+        self.catalog_hint.pack(side="left")
+        catalog_body = tk.Frame(catalog, bg=self.colors["surface"])
+        catalog_body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        self.list_container = tk.Frame(catalog_body, bg=self.colors["surface"])
         columns = ("favorite", "date", "kind", "size", "title")
         self.tree = ttk.Treeview(self.list_container, columns=columns, show="headings", selectmode="extended")
         self.tree.heading("favorite", text="★", anchor="center")
@@ -1319,11 +1322,11 @@ class App:
         self.tree.heading("kind", text="סוג קובץ", anchor="e")
         self.tree.heading("size", text="גודל", anchor="e")
         self.tree.heading("title", text="שם המתכון או הקובץ", anchor="e")
-        self.tree.column("favorite", width=46, minwidth=42, anchor="center", stretch=False)
-        self.tree.column("date", width=145, minwidth=125, anchor="e", stretch=False)
-        self.tree.column("kind", width=115, minwidth=95, anchor="e", stretch=False)
-        self.tree.column("size", width=95, minwidth=80, anchor="e", stretch=False)
-        self.tree.column("title", width=470, minwidth=210, anchor="e", stretch=True)
+        self.tree.column("favorite", width=42, minwidth=38, anchor="center", stretch=False)
+        self.tree.column("date", width=125, minwidth=110, anchor="e", stretch=False)
+        self.tree.column("kind", width=100, minwidth=85, anchor="e", stretch=False)
+        self.tree.column("size", width=82, minwidth=70, anchor="e", stretch=False)
+        self.tree.column("title", width=340, minwidth=190, anchor="e", stretch=True)
         scroll = ttk.Scrollbar(self.list_container, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.tag_configure("even", background=self.colors["surface"])
@@ -1333,24 +1336,123 @@ class App:
         self.tree.bind("<<TreeviewSelect>>", self.show_selected)
         self.tree.bind("<Double-1>", lambda _event: self.open_selected())
 
-        self.gallery_container = ttk.Frame(table_body, style="Card.TFrame")
+        self.gallery_container = tk.Frame(catalog_body, bg=self.colors["surface"])
         self.gallery_canvas = tk.Canvas(self.gallery_container, background=self.colors["surface"], highlightthickness=0, bd=0)
         gallery_scroll = ttk.Scrollbar(self.gallery_container, orient="vertical", command=self.gallery_canvas.yview)
         self.gallery_canvas.configure(yscrollcommand=gallery_scroll.set)
         gallery_scroll.pack(side="left", fill="y")
         self.gallery_canvas.pack(side="right", fill="both", expand=True)
-        self.gallery_inner = ttk.Frame(self.gallery_canvas, style="Card.TFrame")
+        self.gallery_inner = tk.Frame(self.gallery_canvas, bg=self.colors["surface"])
         self.gallery_window = self.gallery_canvas.create_window((0, 0), window=self.gallery_inner, anchor="nw")
         self.gallery_inner.bind("<Configure>", lambda _event: self.gallery_canvas.configure(scrollregion=self.gallery_canvas.bbox("all")))
         self.gallery_canvas.bind("<Configure>", lambda event: self.gallery_canvas.itemconfigure(self.gallery_window, width=event.width))
-        if self.view_mode.get() == "גלריה":
-            self.gallery_container.pack(fill="both", expand=True)
-        else:
-            self.list_container.pack(fill="both", expand=True)
+        self.gallery_canvas.bind("<MouseWheel>", lambda event: self.gallery_canvas.yview_scroll(int(-event.delta / 120), "units"))
+        self.gallery_container.pack(fill="both", expand=True)
 
-        status_frame = ttk.Frame(outer, padding=(10, 7), style="Card.TFrame")
-        status_frame.pack(fill="x", pady=(10, 0))
-        ttk.Label(status_frame, textvariable=self.status_value, style="Status.TLabel", anchor="e").pack(fill="x")
+        self._compat_frame = tk.Frame(self.root)
+        self.filter_combo = ttk.Combobox(self._compat_frame, textvariable=self.filter_value)
+        self.tag_combo = ttk.Combobox(self._compat_frame, textvariable=self.tag_filter_value)
+        self.folder_combo = ttk.Combobox(self._compat_frame, textvariable=self.folder_filter_value)
+        self.preview_image = tk.Canvas(self._compat_frame, width=1, height=1)
+        self.detail_label = ttk.Label(self._compat_frame)
+        self.status_frame = tk.Frame(workspace, bg=self.colors["background"])
+        self.status_frame.pack(fill="x", pady=(8, 0))
+        self.status_label = tk.Label(
+            self.status_frame, textvariable=self.status_value, bg=self.colors["background"],
+            fg=self.colors["muted"], font=("Segoe UI", 9), anchor="e"
+        )
+        self.status_label.pack(fill="x")
+        self._update_navigation_active()
+        self._render_reader(None)
+
+    def _add_nav_button(self, parent, key, glyph, label):
+        button = tk.Button(
+            parent, text=f"{glyph}    {label}", anchor="e", justify="right",
+            command=lambda value=key: self._navigate(value),
+            bg=self.colors["sidebar"], fg="#E6EEE8",
+            activebackground=self.colors["sidebar_active"], activeforeground="#FFFFFF",
+            relief="flat", bd=0, padx=20, pady=11, cursor="hand2",
+            font=("Segoe UI", 10, "bold")
+        )
+        button.pack(fill="x", padx=10, pady=2)
+        self.nav_buttons[key] = button
+
+    def _update_navigation_active(self):
+        active = getattr(self, "current_page", "recipes")
+        for key, button in getattr(self, "nav_buttons", {}).items():
+            try:
+                selected = key == active
+                button.configure(
+                    bg=self.colors["sidebar_active"] if selected else self.colors["sidebar"],
+                    fg="#FFFFFF" if selected else "#D7E2D9"
+                )
+            except tk.TclError:
+                pass
+
+    def _navigate(self, key):
+        if key == "scanner":
+            self.open_ocr_scanner()
+            return
+        if key == "center":
+            self.open_recipe_center()
+            return
+        if key == "import":
+            self.add_files()
+            return
+        if key == "folder":
+            self.add_folder()
+            return
+        if key == "backup":
+            self.backup()
+            return
+        if key == "recycle":
+            self.open_recycle_bin()
+            return
+        if key == "settings":
+            self.settings()
+            return
+
+        self.current_page = key
+        if key == "recipes":
+            self.filter_value.set("כל הקבצים")
+            self.recipe_filter_value.set("מתכונים בלבד")
+            self.page_title_label.configure(text="המתכונים שלי")
+            self.page_subtitle_label.configure(text="כל המתכונים שלך במקום אחד. בוחרים מתכון ומתחילים לקרוא.")
+            self.catalog_title.configure(text="כל המתכונים")
+        elif key == "favorites":
+            self.filter_value.set("★ מועדפים")
+            self.recipe_filter_value.set("מתכונים בלבד")
+            self.page_title_label.configure(text="המתכונים שאהבתי")
+            self.page_subtitle_label.configure(text="המתכונים שסימנת כמועדפים, תמיד בהישג יד.")
+            self.catalog_title.configure(text="מועדפים")
+        elif key == "files":
+            self.filter_value.set("כל הקבצים")
+            self.recipe_filter_value.set("כל הפריטים")
+            self.page_title_label.configure(text="כל הקבצים")
+            self.page_subtitle_label.configure(text="גם המסמכים, התמונות והקבצים ששמרת בספרייה.")
+            self.catalog_title.configure(text="כל הפריטים בספרייה")
+        desired_view = "רשימה" if key == "files" else "גלריה"
+        self._update_navigation_active()
+        if self.view_mode.get() != desired_view:
+            self.view_mode.set(desired_view)
+            self.change_view_mode()
+        else:
+            self.refresh()
+
+    def _set_view(self, mode):
+        if mode not in ("רשימה", "גלריה") or self.view_mode.get() == mode:
+            return
+        self.view_mode.set(mode)
+        self.change_view_mode()
+
+    def _rebuild_shell(self):
+        try:
+            self.shell.destroy()
+        except Exception:
+            pass
+        self._build()
+        self.refresh()
+
 
     def change_view_mode(self):
         """Switch between list and gallery views and remember the choice."""
@@ -1389,41 +1491,91 @@ class App:
             child.destroy()
         self.gallery_photos = []
         self.gallery_cards = {}
-        columns = 4
+        columns = 2
+        self.gallery_inner.grid_columnconfigure(0, weight=1, uniform="recipe-cards")
+        self.gallery_inner.grid_columnconfigure(1, weight=1, uniform="recipe-cards")
+        if not ranked:
+            empty = tk.Frame(self.gallery_inner, bg=self.colors["surface"], padx=20, pady=42)
+            empty.grid(row=0, column=0, columnspan=columns, sticky="nsew", padx=18, pady=18)
+            tk.Label(empty, text="🍲", bg=self.colors["surface"], fg=self.colors["accent"],
+                     font=("Segoe UI Emoji", 42)).pack()
+            tk.Label(empty, text="עדיין אין מתכונים להצגה", bg=self.colors["surface"],
+                     fg=self.colors["navy"], font=("Segoe UI", 16, "bold")).pack(pady=(10, 4))
+            tk.Label(empty, text="אפשר להוסיף תמונות, סריקות או קובצי מתכונים. הם יופיעו כאן.",
+                     bg=self.colors["surface"], fg=self.colors["muted"],
+                     font=("Segoe UI", 10), wraplength=420, justify="center").pack()
+            tk.Button(empty, text="＋ הוספת מתכונים", command=self.add_files,
+                      bg=self.colors["accent"], fg="#FFFFFF", activebackground=self.colors["accent_hover"],
+                      relief="flat", bd=0, padx=18, pady=9, cursor="hand2",
+                      font=("Segoe UI", 10, "bold")).pack(pady=(16, 0))
+            self.gallery_canvas.configure(scrollregion=self.gallery_canvas.bbox("all"))
+            return
+
         for index, (_score, row, file_size, _imported) in enumerate(ranked):
             item_id = str(row["id"])
             selected = item_id == str(self.selected_item_id)
-            card = tk.Frame(self.gallery_inner, background=self.colors["surface"], highlightbackground=self.colors["accent"] if selected else self.colors["border"], highlightthickness=3 if selected else 1, bd=0, cursor="hand2")
-            card.grid(row=index // columns, column=columns - 1 - (index % columns), sticky="nsew", padx=7, pady=7)
+            card = tk.Frame(
+                self.gallery_inner, background=self.colors["surface"],
+                highlightbackground=self.colors["accent"] if selected else self.colors["border"],
+                highlightthickness=2 if selected else 1, bd=0, cursor="hand2"
+            )
+            card.grid(
+                row=index // columns, column=columns - 1 - (index % columns),
+                sticky="nsew", padx=8, pady=8
+            )
             self.gallery_cards[item_id] = card
-            suffix = row["extension"].lower()
+            data = self.library.get_recipe_data(row["id"])
+            image_path = str(data.get("image_path") or "")
+            if not image_path and row["extension"].lower() in IMAGE_TYPES:
+                image_path = row["stored_path"]
             preview = None
-            if suffix in IMAGE_TYPES and Image is not None and ImageTk is not None:
+            if image_path and Image is not None and ImageTk is not None:
                 try:
-                    with Image.open(row["stored_path"]) as source:
-                        source.thumbnail((170, 112))
+                    with Image.open(image_path) as source:
+                        source = ImageOps.exif_transpose(source).convert("RGB")
+                        source = ImageOps.fit(source, (250, 132))
                         preview = ImageTk.PhotoImage(source.copy())
                     self.gallery_photos.append(preview)
                 except Exception:
                     preview = None
+            cover = tk.Frame(card, bg=self.colors["cover"], height=132)
+            cover.pack(fill="x", padx=9, pady=(9, 5))
+            cover.pack_propagate(False)
             if preview is not None:
-                picture = tk.Label(card, image=preview, background=self.colors["surface"], height=112)
-                picture.image = preview
+                image_label = tk.Label(cover, image=preview, bg=self.colors["cover"], cursor="hand2")
+                image_label.image = preview
+                image_label.pack(fill="both", expand=True)
             else:
-                picture = tk.Label(card, text=file_kind(suffix), background=self.colors["row_alt"], foreground=self.colors["accent"], font=("Segoe UI", 16, "bold"), height=4)
-            picture.pack(fill="x", padx=8, pady=(8, 5))
-            title = tk.Label(card, text=row["title"], background=self.colors["surface"], foreground=self.colors["navy"], font=("Segoe UI", 10, "bold"), justify="right", anchor="e", wraplength=170)
-            title.pack(fill="x", padx=9, pady=(2, 4))
-            size_label = f"{file_size / (1024 * 1024):.1f} MB" if file_size >= 1024 * 1024 else f"{max(1, file_size // 1024)} KB"
-            details = tk.Label(card, text=f"{file_kind(suffix)}  ·  {row['imported_at']}  ·  {size_label}", background=self.colors["surface"], foreground=self.colors["muted"], font=("Segoe UI", 8), justify="right", anchor="e", wraplength=170)
-            details.pack(fill="x", padx=9, pady=(0, 9))
+                tk.Label(cover, text="🍲", bg=self.colors["cover"], fg=self.colors["accent"],
+                         font=("Segoe UI Emoji", 40), cursor="hand2").pack(expand=True)
+            tk.Label(
+                card, text=row["title"], background=self.colors["surface"],
+                foreground=self.colors["navy"], font=("Segoe UI", 11, "bold"),
+                justify="right", anchor="e", wraplength=235, height=2
+            ).pack(fill="x", padx=12, pady=(4, 2))
+            prep = str(data.get("prep_minutes") or "").strip()
+            cook = str(data.get("cook_minutes") or "").strip()
+            servings = str(data.get("servings") or "").strip()
+            meta_parts = []
+            if prep or cook:
+                total = sum(int(value) for value in (prep, cook) if value.isdigit())
+                meta_parts.append(f"{total} דק׳")
+            if servings:
+                meta_parts.append(f"{servings} מנות")
+            rating = str(data.get("rating") or "").strip()
+            if rating.isdigit() and int(rating) > 0:
+                meta_parts.append("★ " + rating)
+            tk.Label(
+                card, text="  ·  ".join(meta_parts) if meta_parts else (data.get("category") or "מתכון"),
+                background=self.colors["surface"], foreground=self.colors["muted"],
+                font=("Segoe UI", 9), justify="right", anchor="e"
+            ).pack(fill="x", padx=12, pady=(1, 9))
             if row["is_favorite"]:
-                favorite = tk.Label(card, text="★ מועדף", background=self.colors["surface"], foreground=self.colors["accent"], font=("Segoe UI", 8, "bold"))
-                favorite.pack(anchor="e", padx=9, pady=(0, 5))
+                tk.Label(card, text="★", background=self.colors["surface"],
+                         foreground=self.colors["accent"], font=("Segoe UI", 12, "bold")).place(relx=0.94, y=10, anchor="ne")
             self._bind_gallery_click(card, item_id)
-        for column in range(columns):
-            self.gallery_inner.grid_columnconfigure(column, weight=1, uniform="gallery")
         self.gallery_canvas.configure(scrollregion=self.gallery_canvas.bbox("all"))
+
 
     def _update_filter_options(self):
         options = {
@@ -1434,12 +1586,14 @@ class App:
             options[f"📁 {collection['name']}"] = ("collection", int(collection["id"]))
         current = self.filter_value.get()
         self._filter_options = options
-        self.filter_combo.configure(values=list(options))
+        if getattr(self, "filter_combo", None) is not None:
+            self.filter_combo.configure(values=list(options))
         self.filter_value.set(current if current in options else "כל הקבצים")
         categories = ["כל הקטגוריות"] + self.library.all_categories()
         tags = ["כל התגיות"] + self.library.all_tags()
         self.category_combo.configure(values=categories)
-        self.tag_combo.configure(values=tags)
+        if getattr(self, "tag_combo", None) is not None:
+            self.tag_combo.configure(values=tags)
         if self.category_filter_value.get() not in categories:
             self.category_filter_value.set("כל הקטגוריות")
         if self.tag_filter_value.get() not in tags:
@@ -1553,6 +1707,9 @@ class App:
         else:
             ranked.sort(key=lambda x: (x[3] or datetime.min, x[1]["id"]), reverse=True)
 
+        if not selected_id and ranked and self.current_page in ("recipes", "favorites"):
+            selected_id = str(ranked[0][1]["id"])
+
         for item in self.tree.get_children():
             self.tree.delete(item)
         self.current_rows = {}
@@ -1584,15 +1741,9 @@ class App:
             self.preview_render_path = None
             self.preview_photo = None
             self._cleanup_preview_temp()
-            if self._preview_resize_job is not None:
-                try:
-                    self.root.after_cancel(self._preview_resize_job)
-                except tk.TclError:
-                    pass
-                self._preview_resize_job = None
-            self._set_preview_placeholder("בחרו תמונה או קובץ מהרשימה")
-            self.detail_label.configure(text="")
+            self._render_reader(None)
             self._update_selection_actions(None)
+
 
     def selected_row(self):
         if self.view_mode.get() == "גלריה":
@@ -1631,39 +1782,149 @@ class App:
         row = self.selected_row()
         if not row:
             self._update_selection_actions(None)
+            self._render_reader(None)
             return
         self.selected_item_id = str(row["id"])
-        path = Path(row["stored_path"])
-        collection_names = self.library.item_collection_names(row["id"])
-        collection_text = ", ".join(collection_names) if collection_names else "ללא אוסף"
-        tag_names = self.library.tag_names(row["id"])
-        category = self.library.get_recipe_data(row["id"]).get("category", "")
-        info = (
-            f"שם: {row['title']}\n"
-            f"קובץ מקורי: {row['original_name']}\n"
-            f"נוסף בתאריך: {row['imported_at']}\n"
-            f"קטגוריה: {category or 'ללא קטגוריה'}\n"
-            f"תיקייה: {self.library.get_recipe_data(row['id']).get('source_folder') or 'שורש הספרייה'}\n"
-            f"דירוג אישי: {self.library.get_recipe_data(row['id']).get('rating') or 'ללא דירוג'}\n"
-            f"תגיות: {', '.join(tag_names) if tag_names else 'ללא תגיות'}\n"
-            f"אוספים: {collection_text}"
-        )
-        self.detail_label.configure(text=info)
         self._update_selection_actions(row)
-        self._cleanup_preview_temp()
-        self.preview_photo = None
-        self.preview_path = path
-        self.preview_render_path = path
-        self.preview_notice = ""
-        if path.suffix.lower() in OFFICE_TYPES:
-            converted, temp_dir, notice = convert_office_to_pdf(path)
-            if converted is not None:
-                self.preview_render_path = converted
-                self.preview_temp_directory = temp_dir
-            else:
-                self.preview_notice = notice
-        self._set_preview_placeholder("טוען תצוגה מקדימה…")
-        self.root.after_idle(self._render_selected_preview)
+        self._render_reader(row)
+        self._render_gallery_cards_selection()
+
+    def _render_reader(self, row):
+        """Render the active recipe as a scrollable reading page."""
+        if not hasattr(self, "reader_inner"):
+            return
+        for child in self.reader_inner.winfo_children():
+            child.destroy()
+        self.favorite_button = None
+        self.reader_photos = []
+        if row is None:
+            tk.Label(self.reader_inner, text="📖", bg=self.colors["surface"],
+                     fg=self.colors["accent"], font=("Segoe UI Emoji", 42)).pack(fill="x", pady=(52, 8))
+            tk.Label(self.reader_inner, text="המתכון הבא שלך מתחיל כאן",
+                     bg=self.colors["surface"], fg=self.colors["navy"],
+                     font=("Segoe UI", 14, "bold"), wraplength=320, justify="center").pack(fill="x", padx=18)
+            tk.Label(self.reader_inner, text="בחרו מתכון מהכרטיסים כדי לקרוא את המצרכים וההוראות.",
+                     bg=self.colors["surface"], fg=self.colors["muted"],
+                     font=("Segoe UI", 10), wraplength=310, justify="center").pack(fill="x", padx=18, pady=(6, 0))
+            return
+
+        data = self.library.get_recipe_data(row["id"])
+        image_path = str(data.get("image_path") or "")
+        if not image_path and row["extension"].lower() in IMAGE_TYPES:
+            image_path = row["stored_path"]
+        photo = None
+        if image_path and Image is not None and ImageTk is not None:
+            try:
+                with Image.open(image_path) as source:
+                    source = ImageOps.exif_transpose(source).convert("RGB")
+                    source = ImageOps.fit(source, (330, 176))
+                    photo = ImageTk.PhotoImage(source.copy())
+                self.reader_photos.append(photo)
+            except Exception:
+                photo = None
+        if photo is None and row["extension"].lower() == ".pdf" and fitz is not None and Image is not None and ImageTk is not None:
+            try:
+                with fitz.open(row["stored_path"]) as document:
+                    if document.page_count:
+                        page = document[0]
+                        pix = page.get_pixmap(matrix=fitz.Matrix(1.1, 1.1), alpha=False)
+                        source = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                        source = ImageOps.fit(source, (330, 176))
+                        photo = ImageTk.PhotoImage(source.copy())
+                        self.reader_photos.append(photo)
+            except Exception:
+                photo = None
+        if photo is not None:
+            image_label = tk.Label(self.reader_inner, image=photo, bg=self.colors["surface"])
+            image_label.image = photo
+            image_label.pack(fill="x", padx=14, pady=(7, 10))
+        else:
+            cover = tk.Frame(self.reader_inner, bg=self.colors["cover"], height=112)
+            cover.pack(fill="x", padx=14, pady=(7, 10))
+            cover.pack_propagate(False)
+            tk.Label(cover, text="🍲", bg=self.colors["cover"], fg=self.colors["accent"],
+                     font=("Segoe UI Emoji", 38)).pack(expand=True)
+
+        tk.Label(
+            self.reader_inner, text=row["title"], bg=self.colors["surface"],
+            fg=self.colors["navy"], font=("Segoe UI", 17, "bold"),
+            justify="right", anchor="e", wraplength=325
+        ).pack(fill="x", padx=16, pady=(0, 5))
+        meta = []
+        if data.get("category"):
+            meta.append(str(data["category"]))
+        if data.get("prep_minutes"):
+            meta.append(f"הכנה: {data['prep_minutes']} דק׳")
+        if data.get("cook_minutes"):
+            meta.append(f"בישול: {data['cook_minutes']} דק׳")
+        if data.get("servings"):
+            meta.append(f"{data['servings']} מנות")
+        if data.get("rating"):
+            meta.append("★ " + str(data["rating"]))
+        tk.Label(
+            self.reader_inner, text="  ·  ".join(meta) if meta else "מתכון מהספרייה שלך",
+            bg=self.colors["surface"], fg=self.colors["muted"],
+            font=("Segoe UI", 9), justify="right", anchor="e", wraplength=325
+        ).pack(fill="x", padx=16, pady=(0, 9))
+
+        actions = tk.Frame(self.reader_inner, bg=self.colors["surface"])
+        actions.pack(fill="x", padx=12, pady=(0, 11))
+        self.favorite_button = tk.Button(
+            actions, text="★ מועדף" if row["is_favorite"] else "☆ מועדף",
+            command=self.toggle_favorite, bg=self.colors["row_alt"], fg=self.colors["navy"],
+            activebackground=self.colors["selected"], relief="flat", bd=0,
+            padx=10, pady=7, cursor="hand2", font=("Segoe UI", 9, "bold")
+        )
+        self.favorite_button.pack(side="right", fill="x", expand=True, padx=3)
+        tk.Button(
+            actions, text="עריכה", command=self.edit_recipe,
+            bg=self.colors["accent"], fg="#FFFFFF", activebackground=self.colors["accent_hover"],
+            relief="flat", bd=0, padx=10, pady=7, cursor="hand2",
+            font=("Segoe UI", 9, "bold")
+        ).pack(side="right", fill="x", expand=True, padx=3)
+        tools = tk.Frame(self.reader_inner, bg=self.colors["surface"])
+        tools.pack(fill="x", padx=12, pady=(0, 10))
+        tk.Button(
+            tools, text="מצב בישול", command=lambda: self.open_recipe_center(initial_item_id=int(row["id"])),
+            bg=self.colors["row_alt"], fg=self.colors["navy"], activebackground=self.colors["selected"],
+            relief="flat", bd=0, padx=10, pady=7, cursor="hand2", font=("Segoe UI", 9)
+        ).pack(side="right", fill="x", expand=True, padx=3)
+        tk.Button(
+            tools, text="הדפסה", command=self.print_selected_recipe,
+            bg=self.colors["row_alt"], fg=self.colors["navy"], activebackground=self.colors["selected"],
+            relief="flat", bd=0, padx=10, pady=7, cursor="hand2", font=("Segoe UI", 9)
+        ).pack(side="right", fill="x", expand=True, padx=3)
+
+        def add_section(heading, content, height=6):
+            section = tk.Frame(self.reader_inner, bg=self.colors["surface"])
+            section.pack(fill="x", padx=15, pady=(4, 9))
+            tk.Label(section, text=heading, bg=self.colors["surface"], fg=self.colors["navy"],
+                     font=("Segoe UI", 11, "bold"), anchor="e").pack(fill="x", pady=(0, 4))
+            area = tk.Text(
+                section, height=height, wrap="word", font=("Segoe UI", 10),
+                bg=self.colors["row_alt"], fg=self.colors["text"], relief="flat",
+                bd=0, padx=10, pady=8, spacing1=2, spacing3=3
+            )
+            area.pack(fill="x")
+            area.insert("1.0", content or "לא נשמר עדיין מידע בחלק הזה.")
+            area.tag_configure("rtl", justify="right")
+            area.tag_add("rtl", "1.0", "end")
+            area.configure(state="disabled")
+
+        content = row["content"] or ""
+        parsed = parse_recipe_text(content)
+        ingredients = data.get("ingredients") or parsed.get("ingredients", "")
+        instructions = data.get("instructions") or parsed.get("instructions", "")
+        add_section("מצרכים", ingredients, max(4, min(9, len((ingredients or "").splitlines()) + 1)))
+        add_section("אופן ההכנה", instructions, max(5, min(12, len((instructions or "").splitlines()) + 1)))
+        if data.get("notes"):
+            add_section("הערות", data["notes"], 4)
+        if not ingredients and not instructions and content:
+            add_section("הטקסט המקורי", content[:5000], 9)
+        self.reader_canvas.update_idletasks()
+        self.reader_canvas.configure(scrollregion=self.reader_canvas.bbox("all"))
+        self.reader_canvas.yview_moveto(0)
+
 
     def toggle_favorite(self):
         row = self.selected_row()
@@ -2219,6 +2480,304 @@ class App:
         ttk.Button(buttons, text="סגירה", command=window.destroy).pack(side="left")
 
 
+    def open_ocr_scanner(self):
+        """Open an offline OCR workspace with source preview and editable recipe fields."""
+        window = tk.Toplevel(self.root)
+        window.title("סורק מתכונים חכם")
+        window.geometry("1360x880")
+        window.minsize(1050, 700)
+        window.configure(background=self.colors["background"])
+        window.transient(self.root)
+
+        outer = tk.Frame(window, bg=self.colors["background"], padx=18, pady=16)
+        outer.pack(fill="both", expand=True)
+        tk.Label(outer, text="סורק מתכונים חכם", bg=self.colors["background"],
+                 fg=self.colors["navy"], font=("Segoe UI", 22, "bold"), anchor="e").pack(fill="x")
+        tk.Label(outer, text="מייבאים צילום או PDF סרוק, בודקים את הזיהוי ושומרים מתכון מסודר.",
+                 bg=self.colors["background"], fg=self.colors["muted"],
+                 font=("Segoe UI", 10), anchor="e").pack(fill="x", pady=(2, 12))
+
+        state = {"paths": [], "result": None, "current_path": None, "preview": None}
+        toolbar = tk.Frame(outer, bg=self.colors["surface"], padx=12, pady=10)
+        toolbar.pack(fill="x", pady=(0, 10))
+        list_area = tk.Frame(outer, bg=self.colors["surface"], padx=10, pady=8)
+        list_area.pack(fill="x", pady=(0, 10))
+        tk.Label(list_area, text="קבצים לסריקה", bg=self.colors["surface"],
+                 fg=self.colors["navy"], font=("Segoe UI", 10, "bold"), anchor="e").pack(fill="x")
+        file_list = tk.Listbox(
+            list_area, height=3, selectmode="browse", activestyle="none",
+            font=("Segoe UI", 10), bg=self.colors["row_alt"], fg=self.colors["text"],
+            relief="flat", highlightthickness=0, justify="right"
+        )
+        file_list.pack(fill="x", pady=(6, 0))
+
+        body = tk.Frame(outer, bg=self.colors["background"])
+        body.pack(fill="both", expand=True)
+        source_panel = tk.Frame(
+            body, bg=self.colors["surface"], width=440,
+            highlightbackground=self.colors["border"], highlightthickness=1
+        )
+        source_panel.pack(side="left", fill="both", padx=(0, 12))
+        source_panel.pack_propagate(False)
+        tk.Label(source_panel, text="המסמך המקורי", bg=self.colors["surface"],
+                 fg=self.colors["navy"], font=("Segoe UI", 12, "bold"), anchor="e").pack(fill="x", padx=12, pady=10)
+        source_view = tk.Label(
+            source_panel, text="בחרו קובץ כדי להציג אותו כאן",
+            bg=self.colors["row_alt"], fg=self.colors["muted"],
+            font=("Segoe UI", 11), justify="center"
+        )
+        source_view.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        editor = tk.Frame(
+            body, bg=self.colors["surface"],
+            highlightbackground=self.colors["border"], highlightthickness=1
+        )
+        editor.pack(side="left", fill="both", expand=True)
+        editor_inner = tk.Frame(editor, bg=self.colors["surface"], padx=14, pady=12)
+        editor_inner.pack(fill="both", expand=True)
+        title_var = tk.StringVar()
+        tk.Label(editor_inner, text="שם המתכון", bg=self.colors["surface"],
+                 fg=self.colors["navy"], font=("Segoe UI", 10, "bold"), anchor="e").pack(fill="x")
+        ttk.Entry(editor_inner, textvariable=title_var, justify="right").pack(fill="x", pady=(4, 10), ipady=3)
+
+        def make_editor(label, height):
+            box = tk.Frame(editor_inner, bg=self.colors["surface"])
+            box.pack(fill="both", expand=True, pady=(0, 8))
+            tk.Label(box, text=label, bg=self.colors["surface"], fg=self.colors["navy"],
+                     font=("Segoe UI", 10, "bold"), anchor="e").pack(fill="x", pady=(0, 4))
+            area = tk.Text(
+                box, height=height, wrap="word", font=("Segoe UI", 10),
+                bg=self.colors["row_alt"], fg=self.colors["text"], relief="flat",
+                padx=10, pady=8, spacing1=2, spacing3=3
+            )
+            area.pack(fill="both", expand=True)
+            area.tag_configure("rtl", justify="right")
+            return area
+
+        ingredients_box = make_editor("מצרכים", 7)
+        instructions_box = make_editor("אופן ההכנה", 8)
+        raw_box = make_editor("טקסט מלא שזוהה – ניתן להשוות למקור", 5)
+        status_var = tk.StringVar(value="בחרו קובץ תמונה או PDF כדי להתחיל.")
+        tk.Label(editor_inner, textvariable=status_var, bg=self.colors["surface"],
+                 fg=self.colors["muted"], font=("Segoe UI", 9), anchor="e").pack(fill="x", pady=(0, 6))
+
+        def add_files():
+            selected = filedialog.askopenfilenames(
+                parent=window, title="בחירת תמונות או מסמכים לסריקה",
+                filetypes=[
+                    ("תמונות ו-PDF", "*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp *.pdf"),
+                    ("כל הקבצים", "*.*")
+                ]
+            )
+            if not selected:
+                return
+            for value in selected:
+                path = Path(value)
+                if path not in state["paths"]:
+                    state["paths"].append(path)
+                    file_list.insert("end", path.name)
+            if file_list.size() and not file_list.curselection():
+                file_list.selection_set(0)
+
+        def remove_file():
+            selection = file_list.curselection()
+            if not selection:
+                return
+            index = selection[0]
+            file_list.delete(index)
+            state["paths"].pop(index)
+            state["result"] = None
+            state["current_path"] = None
+            state["preview"] = None
+            source_view.configure(image="", text="בחרו קובץ כדי להציג אותו כאן")
+            source_view.image = None
+
+        def set_box(box, value):
+            box.configure(state="normal")
+            box.delete("1.0", "end")
+            box.insert("1.0", value or "")
+            box.tag_add("rtl", "1.0", "end")
+
+        def scan_failed(error):
+            scan_button.configure(state="normal")
+            save_button.configure(state="normal")
+            status_var.set("הסריקה לא הושלמה.")
+            messagebox.showerror("שגיאה בסריקה", error, parent=window)
+
+        def finish_scan(payload):
+            state["result"] = payload
+            state["current_path"] = payload["path"]
+            state["preview"] = payload["preview"]
+            title_var.set(payload["parsed"].get("title") or payload["path"].stem)
+            set_box(ingredients_box, payload["parsed"].get("ingredients", ""))
+            set_box(instructions_box, payload["parsed"].get("instructions", ""))
+            set_box(raw_box, payload["text"])
+            preview = payload["preview"]
+            if preview is not None and ImageTk is not None:
+                preview.thumbnail((400, 700), getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1))
+                photo = ImageTk.PhotoImage(preview.copy())
+                source_view.configure(image=photo, text="")
+                source_view.image = photo
+            else:
+                source_view.configure(image="", text=payload["path"].name)
+                source_view.image = None
+            confidence = payload["confidence"]
+            confidence_text = f"רמת ביטחון ממוצעת: {confidence:.0f}%" if confidence else "לא התקבל ציון ביטחון"
+            status_var.set(f"הסריקה הסתיימה. {confidence_text} · בדקו את השדות לפני השמירה.")
+            scan_button.configure(state="normal")
+            save_button.configure(state="normal")
+
+        def scan_selected():
+            selection = file_list.curselection()
+            if not selection:
+                messagebox.showinfo("סריקת מתכון", "בחרו קובץ מהרשימה.", parent=window)
+                return
+            path = state["paths"][selection[0]]
+            if pytesseract is None or Image is None:
+                messagebox.showerror("OCR אינו זמין", "מנוע זיהוי הטקסט אינו זמין בחבילה.", parent=window)
+                return
+            state["result"] = None
+            scan_button.configure(state="disabled")
+            save_button.configure(state="disabled")
+            status_var.set("מנתח את המסמך ומחפש את הכותרת הבולטת בעמוד…")
+
+            def worker():
+                try:
+                    text_parts = []
+                    title_candidate = ""
+                    preview_image = None
+                    confidence_values = []
+                    if path.suffix.lower() == ".pdf":
+                        if fitz is None:
+                            raise RuntimeError("קריאת PDF אינה זמינה בחבילה.")
+                        with fitz.open(path) as document:
+                            for page_index, page in enumerate(document):
+                                page_text = page.get_text("text").strip()
+                                page_image = None
+                                result = {"text": "", "title": "", "confidence": 0}
+                                if not page_text or page_index == 0:
+                                    pix = page.get_pixmap(matrix=fitz.Matrix(2.1, 2.1), alpha=False)
+                                    import io
+                                    with Image.open(io.BytesIO(pix.tobytes("png"))) as rendered:
+                                        page_image = rendered.convert("RGB")
+                                    if page_index == 0:
+                                        preview_image = page_image.copy()
+                                        title_candidate = best_title_from_pdf_page(page) or ""
+                                    result = recognize_image(page_image, pytesseract)
+                                if not page_text:
+                                    page_text = result.get("text", "")
+                                if page_index == 0 and result.get("title"):
+                                    title_candidate = result["title"] or title_candidate
+                                if result.get("confidence"):
+                                    confidence_values.append(result["confidence"])
+                                text_parts.append(page_text)
+                    elif path.suffix.lower() in IMAGE_TYPES:
+                        with Image.open(path) as source:
+                            preview_image = ImageOps.exif_transpose(source).convert("RGB")
+                            result = recognize_image(preview_image, pytesseract)
+                        title_candidate = result.get("title", "")
+                        text_parts.append(result.get("text", ""))
+                        if result.get("confidence"):
+                            confidence_values.append(result["confidence"])
+                    else:
+                        raise ValueError("הקובץ אינו תמונה או PDF נתמך.")
+                    full_text = "\n\n".join(part for part in text_parts if part).strip()
+                    if not full_text:
+                        raise RuntimeError("לא זוהה טקסט. נסו תמונה חדה יותר או סריקה באיכות גבוהה.")
+                    parsed = parse_recipe_text(full_text)
+                    if title_candidate:
+                        parsed["title"] = title_candidate
+                    payload = {
+                        "path": path, "text": full_text, "parsed": parsed,
+                        "title": title_candidate, "preview": preview_image,
+                        "confidence": round(sum(confidence_values) / len(confidence_values), 1) if confidence_values else 0,
+                    }
+                    window.after(0, lambda value=payload: finish_scan(value))
+                except Exception as exc:
+                    error = str(exc)
+                    try:
+                        window.after(0, lambda value=error: scan_failed(value))
+                    except Exception:
+                        pass
+
+            self._scan_thread = threading.Thread(target=worker, daemon=True)
+            self._scan_thread.start()
+
+        def save_recipe():
+            result = state.get("result")
+            if not result:
+                messagebox.showinfo("שמירת מתכון", "יש לסרוק מסמך לפני השמירה.", parent=window)
+                return
+            path = Path(result["path"])
+            title = safe_title(title_var.get().strip())
+            ingredients = ingredients_box.get("1.0", "end-1c").strip()
+            instructions = instructions_box.get("1.0", "end-1c").strip()
+            raw_text = raw_box.get("1.0", "end-1c").strip()
+            if not title or (not ingredients and not instructions):
+                messagebox.showwarning("שמירת מתכון", "יש להזין שם מתכון ולפחות מצרכים או הוראות הכנה.", parent=window)
+                return
+            digest = file_digest(path)
+            existing = self.library.db.execute("SELECT * FROM items WHERE digest=?", (digest,)).fetchone()
+            if existing:
+                item_id = int(existing["id"])
+                row = existing
+            else:
+                OCR_FILE_CACHE[str(path.resolve())] = {"text": raw_text, "title": title}
+                added, message = self.library.import_one(path)
+                if not added:
+                    messagebox.showerror("שמירת מתכון", message, parent=window)
+                    return
+                row = self.library.db.execute("SELECT * FROM items WHERE digest=?", (digest,)).fetchone()
+                if not row:
+                    messagebox.showerror("שמירת מתכון", "הקובץ נשמר אך לא נמצאה הרשומה שלו.", parent=window)
+                    return
+                item_id = int(row["id"])
+            recipe = self.library.get_recipe_data(item_id)
+            recipe.update({
+                "ingredients": ingredients,
+                "instructions": instructions,
+                "is_recipe": True,
+            })
+            if path.suffix.lower() in IMAGE_TYPES:
+                recipe["image_path"] = str(row["stored_path"])
+            self.library.set_recipe_data(item_id, recipe)
+            self.library.db.execute("UPDATE items SET content=? WHERE id=?", (raw_text, item_id))
+            self.library.db.commit()
+            if title != row["title"]:
+                self.library.rename(item_id, title)
+            self.current_page = "recipes"
+            self.filter_value.set("כל הקבצים")
+            self.recipe_filter_value.set("מתכונים בלבד")
+            self.view_mode.set("גלריה")
+            self._rebuild_shell()
+            window.destroy()
+            self.status_value.set("המתכון נסרק ונשמר בספרייה.")
+            messagebox.showinfo("המתכון נשמר", "המתכון נוסף לספרייה בהצלחה.", parent=self.root)
+
+        tk.Button(toolbar, text="＋ בחירת קבצים", command=add_files,
+                  bg=self.colors["accent"], fg="#FFFFFF", activebackground=self.colors["accent_hover"],
+                  relief="flat", bd=0, padx=16, pady=8, cursor="hand2",
+                  font=("Segoe UI", 9, "bold")).pack(side="right", padx=4)
+        tk.Button(toolbar, text="הסרת קובץ", command=remove_file,
+                  bg=self.colors["row_alt"], fg=self.colors["navy"], activebackground=self.colors["selected"],
+                  relief="flat", bd=0, padx=14, pady=8, cursor="hand2",
+                  font=("Segoe UI", 9)).pack(side="right", padx=4)
+        scan_button = tk.Button(toolbar, text="⌕ סריקה וזיהוי", command=scan_selected,
+                                bg=self.colors["sidebar"], fg="#FFFFFF", activebackground=self.colors["sidebar_active"],
+                                relief="flat", bd=0, padx=18, pady=8, cursor="hand2",
+                                font=("Segoe UI", 9, "bold"))
+        scan_button.pack(side="left", padx=4)
+        save_button = tk.Button(toolbar, text="שמירת מתכון בספרייה", command=save_recipe,
+                                bg=self.colors["accent"], fg="#FFFFFF", activebackground=self.colors["accent_hover"],
+                                relief="flat", bd=0, padx=18, pady=8, cursor="hand2",
+                                font=("Segoe UI", 9, "bold"))
+        save_button.pack(side="left", padx=4)
+        tk.Button(toolbar, text="סגירה", command=window.destroy,
+                  bg=self.colors["row_alt"], fg=self.colors["navy"], activebackground=self.colors["selected"],
+                  relief="flat", bd=0, padx=14, pady=8, cursor="hand2",
+                  font=("Segoe UI", 9)).pack(side="left", padx=4)
+        file_list.bind("<<ListboxSelect>>", lambda _event: status_var.set("לחצו על סריקה וזיהוי כדי לנתח את הקובץ הנבחר."))
+
     def open_recipe_center(self, initial_item_id=None):
         RecipeCenter(
             self, extract_ingredients, file_kind, safe_title, convert_office_to_pdf
@@ -2735,7 +3294,7 @@ class App:
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="הגדרות הספרייה", style="Section.TLabel").pack(fill="x", pady=(0, 12))
 
-        theme_var = tk.StringVar(value=self.library.get_setting("color_theme", "כחול"))
+        theme_var = tk.StringVar(value=self.library.get_setting("color_theme", "שמנת"))
         font_var = tk.StringVar(value=self.library.get_setting("font_size", "10"))
         zoom_var = tk.StringVar(value=self.library.get_setting("preview_zoom", "1.0"))
         auto_var = tk.BooleanVar(value=self.library.get_setting("auto_backup_enabled", "0") == "1")
@@ -2751,7 +3310,7 @@ class App:
             ).pack(side="right")
             return row
 
-        option_row("ערכת צבעים:", theme_var, ["כחול", "ירוק", "סגול"])
+        option_row("ערכת עיצוב:", theme_var, ["שמנת", "מרווה", "לילה", "כחול", "ירוק", "סגול"])
         option_row("גודל גופן:", font_var, ["9", "10", "11", "12", "13", "14"])
         option_row("גודל תצוגה מקדימה:", zoom_var, ["0.75", "1.0", "1.25", "1.5"])
         ttk.Checkbutton(
@@ -2788,9 +3347,9 @@ class App:
             if auto_var.get() and not was_enabled and not self.library.get_setting("last_auto_backup", ""):
                 self.library.set_setting("last_auto_backup", datetime.now().isoformat(timespec="seconds"))
             self._apply_styles()
-            self._set_preview_placeholder("בחרו תמונה או קובץ מהרשימה") if not self.preview_path else self._render_selected_preview()
-            self.status_value.set("ההגדרות נשמרו.")
             dialog.destroy()
+            self._rebuild_shell()
+            self.status_value.set("ההגדרות נשמרו.")
 
         buttons = ttk.Frame(frame, style="App.TFrame")
         buttons.pack(fill="x", pady=(14, 0))
