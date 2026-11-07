@@ -1528,7 +1528,7 @@ class App:
             except tk.TclError:
                 pass
 
-    def _embedded_header(self, parent, title, subtitle="", back_command=None):
+    def _embedded_header(self, parent, title, subtitle="", back_command=None, back_text="→  חזרה לספרייה"):
         """Create the shared in-app page header with a clear back action."""
         header = tk.Frame(parent, bg=self.colors["background"], padx=22, pady=16)
         header.pack(fill="x")
@@ -1546,7 +1546,7 @@ class App:
         if back_command is None:
             back_command = lambda target=parent: self._pop_embedded_page(target)
         ModernButton(
-            header, text="→  חזרה לספרייה",
+            header, text=back_text,
             command=back_command,
             width=150, height=40, bg=self.colors["surface"],
             fg=self.colors["navy"], hover_bg=self.colors["soft"],
@@ -2613,7 +2613,6 @@ class App:
         self._embedded_header(dialog, "ניהול אוספים", "סידור המתכונים באוספים אישיים.")
         outer = ttk.Frame(dialog, padding=18, style="App.TFrame")
         outer.pack(fill="both", expand=True)
-        outer.pack(fill="both", expand=True)
         ttk.Label(outer, text="האוספים שלי", style="Section.TLabel").pack(fill="x", anchor="e")
         description = (
             f"סמנו באילו אוספים יופיע הפריט: {row['title']}"
@@ -3473,7 +3472,6 @@ class App:
         self._embedded_header(dialog, "איתור מתכונים וקבצים דומים", "הצגת התאמות אפשריות בלי למחוק שום דבר אוטומטית.")
         frame = ttk.Frame(dialog, padding=15, style="App.TFrame")
         frame.pack(fill="both", expand=True)
-        frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="פריטים דומים לבדיקה", style="Section.TLabel").pack(fill="x", anchor="e")
         ttk.Label(
             frame, text="הזיהוי מבוסס על דמיון בשם ובתוכן. אין מחיקה אוטומטית.",
@@ -3502,7 +3500,6 @@ class App:
         dialog = self._push_embedded_page("סל המחזור")
         self._embedded_header(dialog, "סל המחזור", "שחזור פריטים או מחיקה סופית.")
         frame = ttk.Frame(dialog, padding=15, style="App.TFrame")
-        frame.pack(fill="both", expand=True)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="סל המחזור", style="Section.TLabel").pack(fill="x", anchor="e")
         ttk.Label(
@@ -3634,8 +3631,13 @@ class App:
         self._import_cancel_event = cancel_event
         state = {"added": 0, "skipped": 0, "failed": 0, "processed": 0}
 
+        cancel_action = {"callback": lambda: cancel_event.set()}
         progress_window = self._push_embedded_page("ייבוא ספרייה")
-        self._embedded_header(progress_window, "ייבוא ספרייה", "סריקת הקבצים והכנתם לספרייה.")
+        self._embedded_header(
+            progress_window, "ייבוא ספרייה", "סריקת הקבצים והכנתם לספרייה.",
+            back_command=lambda: cancel_action["callback"](),
+            back_text="ביטול ייבוא"
+        )
         frame = ttk.Frame(progress_window, padding=18, style="App.TFrame")
         frame.pack(fill="both", expand=True)
         progress_text = tk.StringVar(value=f"מכין לייבוא {len(paths)} קבצים…")
@@ -3655,6 +3657,7 @@ class App:
                 cancel_button.configure(state="disabled")
                 progress_text.set("מבטל… הקובץ הנוכחי יסיים עיבוד לפני העצירה.")
         cancel_button.configure(command=request_cancel)
+        cancel_action["callback"] = request_cancel
 
         def publish_result(record, allow_after_cancel=False):
             while True:
