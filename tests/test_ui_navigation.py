@@ -34,6 +34,8 @@ class InAppNavigationTests(unittest.TestCase):
         self.assertIn("actual_items < args.expected_items", capture)
         self.assertIn("def process_family_ids", capture)
         self.assertIn("TH32CS_SNAPPROCESS", capture)
+        self.assertIn("CreateToolhelp32Snapshot.restype = wintypes.HANDLE", capture)
+        self.assertIn('return (None, "")', capture)
         self.assertIn("process_id.value", capture)
         self.assertIn('$env:LOCALAPPDATA = Join-Path', workflow)
         self.assertIn("--process-id $process.Id --expected-items 6", workflow)

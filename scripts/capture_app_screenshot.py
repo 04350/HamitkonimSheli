@@ -30,9 +30,19 @@ def process_family_ids(root_pid: int) -> set[int]:
         ]
 
     kernel32 = ctypes.windll.kernel32
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
     snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    snapshot_value = snapshot if isinstance(snapshot, int) else snapshot.value
     invalid_handle = ctypes.c_void_p(-1).value
-    if snapshot == invalid_handle:
+    if snapshot_value == invalid_handle or not snapshot_value:
         raise OSError("Could not enumerate Windows processes.")
 
     try:
@@ -84,7 +94,7 @@ def find_app_window(title_fragment: str, expected_pid: int | None = None):
     callback_ref = enum_proc_type(callback)
     user32.EnumWindows(callback_ref, 0)
     if not matches:
-        return (None, "", None)
+        return (None, "")
     # Prefer the window owned by the original process; otherwise use its child.
     matches.sort(key=lambda item: item[2] != expected_pid if expected_pid is not None else False)
     hwnd, title, _pid = matches[0]
