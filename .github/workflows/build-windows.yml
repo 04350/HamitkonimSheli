@@ -230,15 +230,21 @@ jobs:
 
       - name: צילום מסך אמיתי של הממשק מתוך Windows
         shell: pwsh
-        continue-on-error: true
         run: |
           $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "recipe-ui-demo-profile"
+          $env:PYTHONIOENCODING = "utf-8"
+          $env:PYTHONUTF8 = "1"
           python scripts/create_ui_demo_data.py
+          if ($LASTEXITCODE -ne 0) { throw "Demo library creation failed." }
           $exe = "dist/חבילת-ספריית-המתכונים/ספריית_המתכונים_שלי.exe"
           $process = Start-Process -FilePath $exe -PassThru
           try {
-            Start-Sleep -Seconds 8
-            python scripts/capture_app_screenshot.py --output "dist/recipe-library-real-ui.png" --pid $process.Id
+            Start-Sleep -Seconds 10
+            python scripts/capture_app_screenshot.py --output "dist/recipe-library-real-ui.png" --process-id $process.Id --expected-items 6
+            if ($LASTEXITCODE -ne 0) { throw "Real application screenshot validation failed." }
+            $shot = Get-Item "dist/recipe-library-real-ui.png" -ErrorAction Stop
+            if ($shot.Length -lt 100000) { throw "Real application screenshot is unexpectedly small." }
+            Write-Host "Verified real app screenshot: $($shot.Length) bytes."
           } finally {
             if ($process -and !$process.HasExited) {
               taskkill /PID $process.Id /T /F | Out-Null

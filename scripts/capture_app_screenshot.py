@@ -8,7 +8,7 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
-from PIL import ImageGrab
+from PIL import ImageGrab, ImageStat
 
 
 def find_app_window(title_fragment: str, expected_pid: int | None = None):
@@ -41,11 +41,32 @@ def find_app_window(title_fragment: str, expected_pid: int | None = None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
-    parser.add_argument("--pid", type=int, default=None, help="PID returned by Start-Process")
+    parser.add_argument("--process-id", type=int, required=True, help="PID returned by Start-Process")
+    parser.add_argument("--expected-items", type=int, default=0, help="Minimum number of demo records that must exist")
     args = parser.parse_args()
 
+    if args.expected_items < 0:
+        raise SystemExit("--expected-items cannot be negative")
+
+    # Verify the isolated demo profile contains the expected records before
+    # capturing anything, so a splash screen or empty library is not accepted.
+    import sys
+    project_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(project_root / "src"))
+    import ספריית_המתכונים as app
+
+    library = app.RecipeLibrary()
+    try:
+        actual_items = len(library.rows())
+    finally:
+        library.db.close()
+    if actual_items < args.expected_items:
+        raise SystemExit(
+            f"Demo library is incomplete: found {actual_items}; expected at least {args.expected_items}"
+        )
+
     user32 = ctypes.windll.user32
-    hwnd, title = find_app_window("ספריית המתכונים שלי", args.pid)
+    hwnd, title = find_app_window("ספריית המתכונים שלי", args.process_id)
     if not hwnd:
         raise SystemExit("The running recipe-library window was not found.")
     user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
@@ -68,8 +89,14 @@ def main():
     )
     if image.width < 900 or image.height < 600:
         raise SystemExit(f"Captured image is too small: {image.size}")
+    deviations = ImageStat.Stat(image.convert("RGB")).stddev
+    if max(deviations) < 8:
+        raise SystemExit("Captured application window appears blank or uniform.")
     image.save(output, format="PNG")
-    print(f"Actual application window captured successfully: {image.width}x{image.height}; output={output}")
+    print(
+        f"Actual application window captured successfully: "
+        f"{image.width}x{image.height}; demo_items={actual_items}; output={output}"
+    )
 
 
 if __name__ == "__main__":

@@ -118,7 +118,7 @@ jobs:
             - מרכז המתכונים נשאר בחלון נפרד כדי לשמור על מסך הספרייה הראשי נקי.
             - כל הנתונים נשמרים מקומית במחשב, ללא חיבור רשת מצד התוכנה.
 
-            לאחר חילוץ ה-ZIP יש להשאיר את קובץ ההפעלה ואת תיקיית LibreOffice יחד.
+            לאחר חילוץ ה-ZIP הראשי, השאירו את קובץ ההפעלה ואת LibreOffice.zip באותה תיקייה. אין צורך לחלץ את LibreOffice.zip; התוכנה תפרוס אותו אוטומטית בעת הצורך.
           files: recipe-library-windows-office.zip
           overwrite_files: true
           fail_on_unmatched_files: true

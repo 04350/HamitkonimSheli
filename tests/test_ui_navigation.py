@@ -30,8 +30,14 @@ class InAppNavigationTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "build-windows.yml").read_text(encoding="utf-8")
         self.assertIn("--process-id", capture)
         self.assertIn("--expected-items", capture)
-        self.assertIn('Environment["LOCALAPPDATA"]', workflow)
+        self.assertIn("args.process_id", capture)
+        self.assertIn("actual_items < args.expected_items", capture)
+        self.assertIn('$env:LOCALAPPDATA = Join-Path', workflow)
+        self.assertIn("--process-id $process.Id --expected-items 6", workflow)
         self.assertNotIn("continue-on-error: true", workflow)
+
+        demo_setup = (ROOT / "scripts" / "create_ui_demo_data.py").read_text(encoding="utf-8")
+        self.assertIn('sys.stdout.reconfigure(encoding="utf-8", errors="replace")', demo_setup)
 
 
 if __name__ == "__main__":

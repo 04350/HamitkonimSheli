@@ -100,6 +100,13 @@ def create_cover(path: Path, index: int, dish: dict):
 
 
 def main():
+    # Windows runners may default to cp1252; demo paths contain Hebrew.
+    # Use UTF-8 explicitly so successful demo creation cannot fail on logging.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     profile = os.environ.get("LOCALAPPDATA")
     if not profile:
         raise SystemExit("LOCALAPPDATA must point to an isolated demo profile.")
