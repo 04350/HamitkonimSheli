@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
@@ -24,16 +25,31 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "PyMuPDF==1.26.7" python-docx striprtf pillow tkinterdnd2 pytesseract openpyxl python-pptx pyinstaller py7zr
           python -c "import fitz; print('PyMuPDF:', fitz.VersionBind)"
-      - name: Install OCR and Office runtimes
+      - name: Download the already verified Office runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: ספריית-המתכונים-שלי-Windows-כולל-Office
+          path: release-artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: 42487779118
+      - name: Extract the Office runtime from the verified release package
+        shell: pwsh
+        run: |
+          $outer = Get-ChildItem release-artifact -Filter '*.zip' -File | Select-Object -First 1
+          if (!$outer) { throw 'Verified release package missing' }
+          $unpacked = Join-Path (Get-Location) 'release-unpacked'
+          Expand-Archive -LiteralPath $outer.FullName -DestinationPath $unpacked -Force
+          $officeZip = Join-Path $unpacked 'LibreOffice.zip'
+          if (!(Test-Path $officeZip)) { throw 'LibreOffice.zip missing from release package' }
+          $lo = Join-Path $env:ProgramFiles 'LibreOffice'
+          New-Item -ItemType Directory -Force -Path $lo | Out-Null
+          Expand-Archive -LiteralPath $officeZip -DestinationPath $lo -Force
+          if (!(Test-Path (Join-Path $lo 'program/soffice.exe'))) { throw 'Office extraction failed' }
+      - name: Install OCR runtime
         shell: pwsh
         run: |
           choco install tesseract --no-progress -y
-          choco install libreoffice-still --no-progress -y
-          $lo = Join-Path $env:ProgramFiles 'LibreOffice'
-          if (!(Test-Path (Join-Path $lo 'program/soffice.exe'))) {
-            $lo = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'LibreOffice'
-          }
-          if (!(Test-Path (Join-Path $lo 'program/soffice.exe'))) { throw 'LibreOffice missing' }
           New-Item -ItemType Directory -Force -Path tesseract/tessdata | Out-Null
           Copy-Item 'C:\Program Files\Tesseract-OCR\tesseract.exe' tesseract/
           Copy-Item 'C:\Program Files\Tesseract-OCR\*.dll' tesseract/ -ErrorAction SilentlyContinue
@@ -55,7 +71,7 @@ jobs:
         shell: pwsh
         run: |
           $lo = Join-Path $env:ProgramFiles 'LibreOffice'
-          if (!(Test-Path (Join-Path $lo 'program/soffice.exe'))) { $lo = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'LibreOffice' }
+          if (!(Test-Path (Join-Path $lo 'program/soffice.exe'))) { throw 'Previously extracted LibreOffice runtime missing' }
           $root = Join-Path (Get-Location) 'package-root'
           New-Item -ItemType Directory -Force -Path $root | Out-Null
           Copy-Item 'dist/ספריית_המתכונים_שלי.exe' $root
