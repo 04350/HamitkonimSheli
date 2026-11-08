@@ -45,6 +45,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install PyMuPDF python-docx striprtf pillow tkinterdnd2 pytesseract openpyxl python-pptx
+          python -m pip install py7zr
 
       - name: בדיקת גדלים, דחיסה, שלמות והמרת Word Excel PowerPoint
         shell: pwsh
@@ -289,6 +290,19 @@ jobs:
           if not results:
               raise SystemExit("No compression methods were tested.")
           '@ | python -
+
+      - name: בדיקת ארכיון 7z רציף יחיד ללא הסרת רכיבים
+        shell: pwsh
+        run: |
+          python scripts/test_solid_package_7z.py
+
+      - name: שמירת דוח בדיקת 7z
+        uses: actions/upload-artifact@v4
+        with:
+          name: solid-7z-test-report
+          path: solid-7z-results.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: שמירת דוח תוצאות הדחיסה
         uses: actions/upload-artifact@v4
