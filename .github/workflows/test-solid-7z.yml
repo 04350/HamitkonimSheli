@@ -48,7 +48,7 @@ jobs:
       - name: בניית 7z רציף ובדיקת קובץ ההפעלה והמרות Office
         shell: pwsh
         run: |
-          python scripts/test_solid_package_7z.py
+          python .github/scripts/test_solid_package_7z.py
 
       - name: שמירת דוח הבדיקה
         uses: actions/upload-artifact@v4
