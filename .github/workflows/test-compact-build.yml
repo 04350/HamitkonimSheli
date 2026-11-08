@@ -103,7 +103,10 @@ jobs:
           try:
             for name,filters in configs:
               archive=out/(name+".7z"); start=time.time()
-              with py7zr.SevenZipFile(archive,"w",filters=filters) as z: z.writeall(root,arcname="")
+              with py7zr.SevenZipFile(archive,"w",filters=filters) as z:
+                  # Store relative names only; absolute runner paths are rejected by secure extractors.
+                  for source_file in sorted(p for p in root.rglob("*") if p.is_file()):
+                      z.write(source_file, arcname=source_file.relative_to(root).as_posix())
               elapsed=round(time.time()-start,1)
               with py7zr.SevenZipFile(archive,"r") as z:
                 bad=z.testzip()
