@@ -1,0 +1,139 @@
+name: Compact build experiment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/test-compact-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install lean PDF engine and dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "PyMuPDF==1.26.7" python-docx striprtf pillow tkinterdnd2 pytesseract openpyxl python-pptx pyinstaller py7zr
+          python -c "import fitz; print('PyMuPDF:', fitz.VersionBind)"
+      - name: Install OCR and Office runtimes
+        shell: pwsh
+        run: |
+          choco install tesseract --no-progress -y
+          choco install libreoffice-still --no-progress -y
+          $lo = Join-Path $env:ProgramFiles 'LibreOffice'
+          if (!(Test-Path (Join-Path $lo 'program/soffice.exe'))) {
+            $lo = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'LibreOffice'
+          }
+          if (!(Test-Path (Join-Path $lo 'program/soffice.exe'))) { throw 'LibreOffice missing' }
+          New-Item -ItemType Directory -Force -Path tesseract/tessdata | Out-Null
+          Copy-Item 'C:\Program Files\Tesseract-OCR\tesseract.exe' tesseract/
+          Copy-Item 'C:\Program Files\Tesseract-OCR\*.dll' tesseract/ -ErrorAction SilentlyContinue
+          Copy-Item 'C:\Program Files\Tesseract-OCR\tessdata\eng.traineddata' tesseract/tessdata/
+          Invoke-WebRequest -Uri 'https://github.com/tesseract-ocr/tessdata_fast/raw/main/heb.traineddata' -OutFile 'tesseract/tessdata/heb.traineddata'
+      - name: Run complete unit tests
+        shell: pwsh
+        run: |
+          python -m py_compile "src/ספריית_המתכונים.py"
+          python -m unittest discover -s tests -v
+      - name: Build the executable
+        shell: pwsh
+        run: |
+          python assets/create_icon.py
+          pyinstaller --noconfirm --clean --onefile --windowed --icon "assets/app_icon.ico" --add-data "assets/app_icon.ico;assets" --name "ספריית_המתכונים_שלי" --collect-all fitz --collect-all PIL --collect-all tkinterdnd2 --collect-all pytesseract --add-data "tesseract;tesseract" --hidden-import striprtf.striprtf --hidden-import docx "src/ספריית_המתכונים.py"
+          if (!(Test-Path "dist/ספריית_המתכונים_שלי.exe")) { throw 'EXE missing' }
+          Write-Host "EXE bytes: $((Get-Item 'dist/ספריית_המתכונים_שלי.exe').Length)"
+      - name: Create and test complete solid 7z packages
+        shell: pwsh
+        run: |
+          $lo = Join-Path $env:ProgramFiles 'LibreOffice'
+          if (!(Test-Path (Join-Path $lo 'program/soffice.exe'))) { $lo = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'LibreOffice' }
+          $root = Join-Path (Get-Location) 'package-root'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Copy-Item 'dist/ספריית_המתכונים_שלי.exe' $root
+          Copy-Item $lo (Join-Path $root 'LibreOffice') -Recurse
+          @'
+          import json, os, shutil, sys, time
+          from pathlib import Path
+          import py7zr
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          from docx import Document
+          import openpyxl
+          from pptx import Presentation
+          import sys
+          root = Path("package-root").resolve()
+          out = Path("compact-output").resolve()
+          out.mkdir(exist_ok=True)
+          docs = out / "docs"; docs.mkdir(exist_ok=True)
+          d=Document(); d.add_paragraph("Word conversion test"); d.save(docs/"sample.docx")
+          w=openpyxl.Workbook(); w.active["A1"]="Excel conversion test"; w.save(docs/"sample.xlsx")
+          p=Presentation(); s=p.slides.add_slide(p.slide_layouts[6]); s.shapes.add_textbox(500000,500000,7000000,1000000).text="PowerPoint conversion test"; p.save(docs/"sample.pptx")
+          sys.path.insert(0, str(Path("src").resolve()))
+          import ספריית_המתכונים as app
+          old=sys.executable; frozen=hasattr(sys,"frozen"); oldf=getattr(sys,"frozen",None)
+          configs=[
+            ("LZMA2-9",[{"id":py7zr.FILTER_LZMA2,"preset":9}]),
+            ("BCJ-LZMA2-9",[{"id":py7zr.FILTER_X86},{"id":py7zr.FILTER_LZMA2,"preset":9}])
+          ]
+          results=[]
+          try:
+            for name,filters in configs:
+              archive=out/(name+".7z"); start=time.time()
+              with py7zr.SevenZipFile(archive,"w",filters=filters) as z: z.writeall(root,arcname="")
+              elapsed=round(time.time()-start,1)
+              with py7zr.SevenZipFile(archive,"r") as z:
+                bad=z.testzip()
+                if bad: raise RuntimeError("7z CRC failure: "+str(bad))
+                z.extractall(path=out/("extract-"+name))
+              extracted=out/("extract-"+name)
+              exe=extracted/"ספריית_המתכונים_שלי.exe"
+              soffice=extracted/"LibreOffice"/"program"/"soffice.exe"
+              if not exe.is_file() or not soffice.is_file(): raise RuntimeError("7z extraction layout mismatch")
+              os.environ["LOCALAPPDATA"]=str(out/("local-"+name))
+              sys.executable=str(exe); sys.frozen=True
+              found=app.find_libreoffice()
+              if not found: raise RuntimeError("app cannot find extracted Office")
+              converted=[]
+              for sample in sorted(docs.iterdir()):
+                pdf,tmp,err=app.convert_office_to_pdf(sample)
+                if err or not pdf or not pdf.is_file(): raise RuntimeError(sample.suffix+" conversion: "+str(err))
+                with app.fitz.open(pdf) as result:
+                  if result.page_count<1: raise RuntimeError("empty conversion")
+                  converted.append(sample.suffix+" OK")
+                if tmp: shutil.rmtree(tmp,ignore_errors=True)
+              results.append({"method":name,"bytes":archive.stat().st_size,"decimal_mb":round(archive.stat().st_size/1e6,2),"under_300mb":archive.stat().st_size<=300000000,"compression_seconds":elapsed,"conversions":converted})
+              print(json.dumps(results[-1],ensure_ascii=False),flush=True)
+          finally:
+            sys.executable=old
+            if frozen: sys.frozen=oldf
+            elif hasattr(sys,"frozen"): del sys.frozen
+          report={"pymupdf":__import__("fitz").VersionBind,"exe_bytes":(root/"ספריית_המתכונים_שלי.exe").stat().st_size,"results":results}
+          (out/"report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("FINAL_REPORT",json.dumps(report,ensure_ascii=False),flush=True)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw '7z packaging or Office conversion test failed' }
+      - name: Confirm packaged application starts
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath (Resolve-Path 'package-root/ספריית_המתכונים_שלי.exe') -PassThru
+          Start-Sleep -Seconds 8
+          $p.Refresh()
+          if ($p.HasExited) { throw 'Application exited during startup' }
+          taskkill /PID $p.Id /T /F | Out-Null
+      - name: Upload compact package experiment
+        uses: actions/upload-artifact@v4
+        with:
+          name: compact-package-experiment
+          path: |
+            compact-output/report.json
+            compact-output/*.7z
+          if-no-files-found: error
+          retention-days: 30
