@@ -41,9 +41,9 @@ jobs:
         with:
           name: ספריית-המתכונים-שלי-Windows-כולל-Office
           path: source-artifact
-          github-token: \${{ secrets.GITHUB_TOKEN }}
-          repository: \${{ github.repository }}
-          run-id: \${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id || '42487779118' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id || '42487779118' }}
 
       - name: בניית 7z רציף ובדיקת קובץ ההפעלה והמרות Office
         shell: pwsh
