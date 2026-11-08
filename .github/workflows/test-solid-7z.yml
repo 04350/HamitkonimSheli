@@ -1,0 +1,59 @@
+name: בדיקת חבילת 7z רציפה יחידה
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/test-solid-7z.yml"
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: מזהה ריצת הבנייה שממנה מורידים את חבילת Windows
+        required: true
+        default: "42487779118"
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  solid-7z:
+    name: דחיסה רציפה ובדיקת תאימות מלאה
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: הורדת המקור
+        uses: actions/checkout@v4
+
+      - name: התקנת Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: התקנת ספריות הבדיקה
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install py7zr PyMuPDF python-docx striprtf pillow tkinterdnd2 pytesseract openpyxl python-pptx
+
+      - name: הורדת חבילת 1.11.0 שנבדקה
+        uses: actions/download-artifact@v4
+        with:
+          name: ספריית-המתכונים-שלי-Windows-כולל-Office
+          path: source-artifact
+          github-token: \${{ secrets.GITHUB_TOKEN }}
+          repository: \${{ github.repository }}
+          run-id: \${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id || '42487779118' }}
+
+      - name: בניית 7z רציף ובדיקת קובץ ההפעלה והמרות Office
+        shell: pwsh
+        run: |
+          python scripts/test_solid_package_7z.py
+
+      - name: שמירת דוח הבדיקה
+        uses: actions/upload-artifact@v4
+        with:
+          name: solid-7z-test-report
+          path: solid-7z-results.json
+          if-no-files-found: error
+          retention-days: 30
