@@ -305,7 +305,7 @@ jobs:
             }
           }
 
-      - name: שמירת צילום מסך אמיתי של הממשק
+      - name: צילום מסך אמיתי של הממשק מתוך Windows – שמירת התוצר
         if: always()
         uses: actions/upload-artifact@v4
         with:
