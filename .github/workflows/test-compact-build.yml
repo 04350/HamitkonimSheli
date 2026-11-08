@@ -76,6 +76,18 @@ jobs:
           New-Item -ItemType Directory -Force -Path $root | Out-Null
           Copy-Item 'dist/ספריית_המתכונים_שלי.exe' $root
           Copy-Item $lo (Join-Path $root 'LibreOffice') -Recurse
+          # These are LibreOffice editor-only extras. The app uses the headless
+          # conversion engine only; every removal is followed by real conversion tests.
+          $officeRoot = Join-Path $root 'LibreOffice'
+          $optionalPaths = @('help', 'share/gallery', 'share/template', 'share/extensions')
+          foreach ($relative in $optionalPaths) {
+            $candidate = Join-Path $officeRoot $relative
+            if (Test-Path $candidate) {
+              $before = (Get-ChildItem -LiteralPath $candidate -Recurse -File | Measure-Object -Property Length -Sum).Sum
+              Remove-Item -LiteralPath $candidate -Recurse -Force
+              Write-Host "Removed optional LibreOffice content: $relative ($before bytes)"
+            }
+          }
           @'
           import json, os, shutil, sys, time
           from pathlib import Path
