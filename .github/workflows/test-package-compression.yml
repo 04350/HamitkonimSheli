@@ -1,0 +1,297 @@
+name: בדיקת דחיסה לחבילת Windows קיימת
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/test-package-compression.yml"
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: מזהה ריצת בנייה שממנה לבדוק את חבילת Windows
+        required: true
+        default: "42487779118"
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  compression-test:
+    name: השוואת שיטות דחיסה ובדיקת המרה
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: הורדת קובצי המקור
+        uses: actions/checkout@v4
+
+      - name: התקנת Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: הורדת החבילה שנבנתה ונבדקה
+        uses: actions/download-artifact@v4
+        with:
+          name: ספריית-המתכונים-שלי-Windows-כולל-Office
+          path: source-artifact
+          github-token: \${{ secrets.GITHUB_TOKEN }}
+          repository: \${{ github.repository }}
+          run-id: \${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id || '42487779118' }}
+
+      - name: התקנת ספריות לבדיקת המרת מסמכים
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install PyMuPDF python-docx striprtf pillow tkinterdnd2 pytesseract openpyxl python-pptx
+
+      - name: בדיקת גדלים, דחיסה, שלמות והמרת Word Excel PowerPoint
+        shell: pwsh
+        run: |
+          @'
+          import copy
+          import json
+          import os
+          import shutil
+          import sys
+          import tempfile
+          import time
+          import zipfile
+          from pathlib import Path
+
+          import openpyxl
+          from docx import Document
+          from pptx import Presentation
+
+          TARGET_BYTES = 300_000_000
+          artifacts = list(Path("source-artifact").rglob("*.zip"))
+          if len(artifacts) != 1:
+              raise SystemExit(f"Expected exactly one package ZIP, found: {artifacts}")
+          package = artifacts[0]
+
+          with zipfile.ZipFile(package) as original:
+              bad = original.testzip()
+              if bad:
+                  raise SystemExit(f"Original package failed CRC check: {bad}")
+              infos = [i for i in original.infolist() if not i.is_dir()]
+              office_info = next((i for i in infos if Path(i.filename).name.lower() == "libreoffice.zip"), None)
+              exe_info = next((i for i in infos if i.filename.lower().endswith(".exe")), None)
+              if office_info is None or exe_info is None:
+                  raise SystemExit(f"Package must contain the application EXE and LibreOffice.zip: {[i.filename for i in infos]}")
+              expected_names = [i.filename for i in original.infolist()]
+              print("ORIGINAL PACKAGE BREAKDOWN")
+              print(f"Package: {package.stat().st_size:,} bytes ({package.stat().st_size / 1_000_000:.2f} MB)")
+              for i in infos:
+                  print(f"  {i.filename}: {i.file_size:,} bytes ({i.file_size / 1_000_000:.2f} MB)")
+              app_exe_name = exe_info.filename
+
+          root = Path("compression-experiment").resolve()
+          root.mkdir(parents=True, exist_ok=True)
+          office_source = root / "LibreOffice-original.zip"
+          with zipfile.ZipFile(package) as original, original.open(office_info) as src, office_source.open("wb") as dst:
+              shutil.copyfileobj(src, dst, length=4 * 1024 * 1024)
+
+          with zipfile.ZipFile(office_source) as office:
+              bad = office.testzip()
+              if bad:
+                  raise SystemExit(f"Original LibreOffice archive failed CRC check: {bad}")
+              office_infos = office.infolist()
+              source_signature = [(i.filename, i.file_size, i.CRC) for i in office_infos]
+              uncompressed_total = sum(i.file_size for i in office_infos)
+              if not any(i.filename.replace("\\", "/").lower() == "program/soffice.exe" for i in office_infos):
+                  raise SystemExit("Original LibreOffice.zip does not contain program/soffice.exe")
+              print(f"LibreOffice entries: {len(office_infos):,}; expanded total: {uncompressed_total:,} bytes")
+
+          sys.path.insert(0, str(Path("src").resolve()))
+          import ספריית_המתכונים as app
+
+          # Create representative Office documents once, then test all three
+          # formats against every recompressed runtime using the app's own
+          # LibreOffice discovery, extraction, and PDF conversion functions.
+          sample_dir = root / "sample-documents"
+          sample_dir.mkdir(exist_ok=True)
+          docx_path = sample_dir / "בדיקת-Word.docx"
+          doc = Document()
+          doc.add_heading("בדיקת חבילת Office", level=1)
+          doc.add_paragraph("בדיקת תקינות המרה למסמך PDF.")
+          doc.save(docx_path)
+
+          xlsx_path = sample_dir / "בדיקת-Excel.xlsx"
+          workbook = openpyxl.Workbook()
+          worksheet = workbook.active
+          worksheet["A1"] = "בדיקת Excel"
+          worksheet["A2"] = 123
+          workbook.save(xlsx_path)
+
+          pptx_path = sample_dir / "בדיקת-PowerPoint.pptx"
+          presentation = Presentation()
+          slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+          textbox = slide.shapes.add_textbox(500000, 500000, 7000000, 1200000)
+          textbox.text = "Office conversion check"
+          presentation.save(pptx_path)
+          samples = [docx_path, xlsx_path, pptx_path]
+
+          old_executable = sys.executable
+          old_frozen = getattr(sys, "frozen", None)
+          had_frozen = hasattr(sys, "frozen")
+          results = []
+
+          def recompress_inner(method_name, method_code, destination):
+              started = time.time()
+              with zipfile.ZipFile(office_source, "r") as zin, zipfile.ZipFile(
+                  destination, "w", compression=method_code, compresslevel=9, allowZip64=True
+              ) as zout:
+                  for info in zin.infolist():
+                      zi = copy.copy(info)
+                      zi.compress_type = method_code
+                      zi._compresslevel = 9
+                      if info.is_dir():
+                          zout.writestr(zi, b"")
+                          continue
+                      with zin.open(info, "r") as source, zout.open(zi, "w", force_zip64=True) as target:
+                          shutil.copyfileobj(source, target, length=4 * 1024 * 1024)
+              with zipfile.ZipFile(destination, "r") as check:
+                  if check.testzip() is not None:
+                      raise RuntimeError(f"{method_name}: recompressed Office archive failed CRC validation")
+                  signature = [(i.filename, i.file_size, i.CRC) for i in check.infolist()]
+                  if signature != source_signature:
+                      raise RuntimeError(f"{method_name}: LibreOffice file list or uncompressed contents metadata changed")
+              return time.time() - started
+
+          def build_outer_package(inner_archive, destination):
+              with zipfile.ZipFile(package, "r") as zin, zipfile.ZipFile(
+                  destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True
+              ) as zout:
+                  for info in zin.infolist():
+                      zi = copy.copy(info)
+                      zi.compress_type = zipfile.ZIP_DEFLATED
+                      zi._compresslevel = 9
+                      if info.filename == office_info.filename:
+                          source_context = inner_archive.open("rb")
+                      else:
+                          source_context = zin.open(info, "r")
+                      with source_context as source, zout.open(zi, "w", force_zip64=True) as target:
+                          shutil.copyfileobj(source, target, length=4 * 1024 * 1024)
+              with zipfile.ZipFile(destination, "r") as check:
+                  if check.testzip() is not None:
+                      raise RuntimeError("Rebuilt outer package failed CRC validation")
+                  if [i.filename for i in check.infolist()] != expected_names:
+                      raise RuntimeError("Rebuilt package does not contain the exact same files")
+
+          def test_actual_app(candidate_package, method_name):
+              test_root = root / ("runtime-" + method_name.lower())
+              extract_root = test_root / "package"
+              local_root = test_root / "local-app-data"
+              shutil.rmtree(test_root, ignore_errors=True)
+              extract_root.mkdir(parents=True)
+              with zipfile.ZipFile(candidate_package) as z:
+                  z.extractall(extract_root)
+              exe_path = extract_root / app_exe_name
+              if not exe_path.is_file():
+                  raise RuntimeError(f"{method_name}: application EXE missing after package extraction")
+
+              os.environ["LOCALAPPDATA"] = str(local_root)
+              sys.executable = str(exe_path)
+              sys.frozen = True
+              engine = app.find_libreoffice()
+              if engine is None or not engine.is_file():
+                  raise RuntimeError(f"{method_name}: the app's LibreOffice ZIP extraction did not locate soffice")
+              if engine.parent.name.lower() != "program":
+                  raise RuntimeError(f"{method_name}: extracted soffice.exe is in an unexpected location")
+
+              converted = []
+              for source in samples:
+                  pdf, temp_dir, error = app.convert_office_to_pdf(source)
+                  if error or pdf is None or not pdf.is_file():
+                      raise RuntimeError(f"{method_name}: failed to convert {source.suffix}: {error}")
+                  try:
+                      with app.fitz.open(pdf) as result:
+                          if result.page_count < 1:
+                              raise RuntimeError(f"{method_name}: {source.suffix} produced an empty PDF")
+                          converted.append(f"{source.suffix.upper()}={result.page_count}p")
+                  finally:
+                      if temp_dir:
+                          shutil.rmtree(temp_dir, ignore_errors=True)
+              return engine.stat().st_size, converted
+
+          methods = [
+              ("DEFLATE-9", zipfile.ZIP_DEFLATED),
+              ("BZIP2-9", zipfile.ZIP_BZIP2),
+              ("LZMA-9", zipfile.ZIP_LZMA),
+          ]
+
+          try:
+              for method_name, method_code in methods:
+                  print(f"\n=== Testing {method_name} ===", flush=True)
+                  inner = root / f"LibreOffice-{method_name}.zip"
+                  outer = root / f"Package-{method_name}.zip"
+                  seconds = recompress_inner(method_name, method_code, inner)
+                  build_outer_package(inner, outer)
+                  size = outer.stat().st_size
+                  engine_size, conversions = test_actual_app(outer, method_name)
+                  result = {
+                      "method": method_name,
+                      "inner_archive_bytes": inner.stat().st_size,
+                      "package_bytes": size,
+                      "package_decimal_mb": round(size / 1_000_000, 2),
+                      "under_300mb": size <= TARGET_BYTES,
+                      "recompress_seconds": round(seconds, 1),
+                      "extracted_libreoffice_exe_bytes": engine_size,
+                      "office_conversions": conversions,
+                  }
+                  results.append(result)
+                  print(json.dumps(result, ensure_ascii=False), flush=True)
+          finally:
+              sys.executable = old_executable
+              if had_frozen:
+                  sys.frozen = old_frozen
+              elif hasattr(sys, "frozen"):
+                  del sys.frozen
+
+          baseline = package.stat().st_size
+          print("\nFINAL COMPARISON")
+          print(f"Baseline: {baseline:,} bytes ({baseline / 1_000_000:.2f} MB)")
+          for result in results:
+              delta = baseline - result["package_bytes"]
+              print(f'{result["method"]}: {result["package_bytes"]:,} bytes; saved {delta:,} bytes; '
+                    f'{delta / baseline * 100:.2f}%; under 300MB={result["under_300mb"]}')
+          report = {
+              "baseline_bytes": baseline,
+              "baseline_decimal_mb": round(baseline / 1_000_000, 2),
+              "target_bytes": TARGET_BYTES,
+              "methods": results,
+              "same_uncompressed_libreoffice_file_list_and_crc": True,
+              "actual_app_extraction_and_word_excel_powerpoint_conversion_tested": True,
+          }
+          Path("compression-results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+          summary = [
+              "## תוצאות ניסוי דחיסת החבילה",
+              "",
+              f'- גודל מקורי: **{baseline / 1_000_000:.2f} MB**',
+              f'- יעד: **300.00 MB** (300,000,000 בתים)',
+              "",
+              "| שיטה | גודל חבילה | חיסכון | מתחת ל־300MB | המרות Office |",
+              "|---|---:|---:|:---:|---|",
+          ]
+          for x in results:
+              saved = baseline - x["package_bytes"]
+              conversions = ", ".join(x["office_conversions"])
+              summary.append(f'| {x["method"]} | {x["package_decimal_mb"]:.2f} MB | {saved / 1_000_000:.2f} MB ({saved / baseline * 100:.1f}%) | {"כן" if x["under_300mb"] else "לא"} | {conversions} |')
+          summary += [
+              "",
+              "בכל מועמד נבדקו CRC של כל קובצי LibreOffice, שמירת רשימת הקבצים והגדלים המקוריים, חילוץ דרך פונקציית התוכנה עצמה והמרת DOCX, XLSX ו־PPTX ל־PDF."
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write("\n".join(summary) + "\n")
+          if not results:
+              raise SystemExit("No compression methods were tested.")
+          '@ | python -
+
+      - name: שמירת דוח תוצאות הדחיסה
+        uses: actions/upload-artifact@v4
+        with:
+          name: compression-test-report
+          path: compression-results.json
+          if-no-files-found: error
+          retention-days: 30
