@@ -82,7 +82,7 @@ jobs:
           hebrew_text = "עוגת תפוחים"
           try:
               hebrew_draw.text((30, 35), hebrew_text, fill="black", font=font, direction="rtl")
-          except (TypeError, ValueError):
+          except (TypeError, ValueError, KeyError):
               # Fallback for Pillow builds without the optional RTL layout engine.
               hebrew_draw.text((30, 35), hebrew_text[::-1], fill="black", font=font)
           recognized_hebrew = app.ocr_image(hebrew_image)
