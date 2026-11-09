@@ -76,7 +76,20 @@ jobs:
           recognized = app.ocr_image(image).upper()
           if "APPLE" not in recognized:
               raise SystemExit(f"OCR recognition failed. Output: {recognized!r}")
-          print("OCR OK: Hebrew and English data loaded; APPLE was recognized.")
+          hebrew_image = Image.new("RGB", (1200, 220), "white")
+          hebrew_draw = ImageDraw.Draw(hebrew_image)
+          hebrew_text = "עוגת תפוחים"
+          try:
+              hebrew_draw.text((30, 35), hebrew_text, fill="black", font=font, direction="rtl")
+          except (TypeError, ValueError):
+              # Fallback for Pillow builds without the optional RTL layout engine.
+              hebrew_draw.text((30, 35), hebrew_text[::-1], fill="black", font=font)
+          recognized_hebrew = app.ocr_image(hebrew_image)
+          hebrew_image.close()
+          hebrew_count = sum(1 for char in recognized_hebrew if "א" <= char <= "ת")
+          if hebrew_count < 6:
+              raise SystemExit(f"Hebrew OCR recognition failed. Output: {recognized_hebrew!r}")
+          print(f"OCR OK: English and Hebrew recognized ({hebrew_count} Hebrew letters).")
           '@ | python -
 
       - name: בדיקת תקינות קוד ובדיקות יחידה

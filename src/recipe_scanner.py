@@ -25,8 +25,66 @@ _HEADER_ONLY = {
 }
 
 
+def _otsu_threshold(image) -> int:
+    """Choose a per-image threshold from its grayscale histogram (Otsu)."""
+    histogram = image.histogram()[:256]
+    total = sum(histogram)
+    if not total:
+        return 178
+    weighted_total = sum(level * count for level, count in enumerate(histogram))
+    background_weight = 0
+    background_sum = 0
+    best_variance = -1.0
+    best_threshold = 178
+    for level, count in enumerate(histogram):
+        background_weight += count
+        if not background_weight:
+            continue
+        foreground_weight = total - background_weight
+        if not foreground_weight:
+            break
+        background_sum += level * count
+        background_mean = background_sum / background_weight
+        foreground_mean = (weighted_total - background_sum) / foreground_weight
+        variance = background_weight * foreground_weight * (background_mean - foreground_mean) ** 2
+        if variance > best_variance:
+            best_variance = variance
+            best_threshold = level
+    return max(105, min(225, best_threshold))
+
+
+def _crop_page_margins(gray):
+    """Remove only large, clearly blank page margins; preserve the page otherwise."""
+    width, height = gray.size
+    if width < 100 or height < 100:
+        return gray.copy()
+    threshold = max(185, min(238, _otsu_threshold(gray) + 25))
+    mask = gray.point(lambda value: 255 if value < threshold else 0)
+    try:
+        bounds = mask.getbbox()
+    finally:
+        mask.close()
+    if not bounds:
+        return gray.copy()
+    left, top, right, bottom = bounds
+    pad_x = max(10, int(width * 0.025))
+    pad_y = max(10, int(height * 0.025))
+    left = max(0, left - pad_x)
+    top = max(0, top - pad_y)
+    right = min(width, right + pad_x)
+    bottom = min(height, bottom + pad_y)
+    crop_width, crop_height = right - left, bottom - top
+    # Avoid cropping photographs, colored paper, or pages with content near an edge.
+    if crop_width < width * 0.5 or crop_height < height * 0.5:
+        return gray.copy()
+    retained = (crop_width * crop_height) / max(1, width * height)
+    if retained > 0.92:
+        return gray.copy()
+    return gray.crop((left, top, right, bottom))
+
+
 def preprocess_image(image):
-    """Downsample oversized scans before RGB conversion to cap OCR memory use."""
+    """Normalize orientation, safely trim blank margins, and create adaptive OCR variants."""
     if ImageOps is None:
         return image, image
     oriented = ImageOps.exif_transpose(image)
@@ -46,8 +104,10 @@ def preprocess_image(image):
     source = source.convert("RGB")
     gray = ImageOps.grayscale(source)
     source.close()
-    adjusted = ImageOps.autocontrast(gray, cutoff=1)
+    cropped = _crop_page_margins(gray)
     gray.close()
+    adjusted = ImageOps.autocontrast(cropped, cutoff=1)
+    cropped.close()
     if ImageFilter is not None:
         filtered = adjusted.filter(ImageFilter.MedianFilter(size=3))
         adjusted.close()
@@ -55,10 +115,10 @@ def preprocess_image(image):
         filtered.close()
         adjusted = sharpened
     enhanced = ImageEnhance.Contrast(adjusted).enhance(1.1) if ImageEnhance else adjusted.copy()
-    threshold = enhanced.point(lambda value: 255 if value >= 178 else 0)
+    binary_threshold = _otsu_threshold(enhanced)
+    threshold = enhanced.point(lambda value: 255 if value >= binary_threshold else 0)
     adjusted.close()
     return enhanced, threshold
-
 
 def lines_from_tesseract_data(data: dict[str, Any]) -> list[dict[str, Any]]:
     groups: dict[tuple[int, int, int], list[dict[str, Any]]] = {}
@@ -184,25 +244,28 @@ def _recognize_attempt(image, pytesseract_module, psm: int) -> dict[str, Any] | 
 
 
 def recognize_image(image, pytesseract_module=None) -> dict[str, Any]:
-    """Use one normal OCR pass, retry with alternate layouts only when confidence is poor."""
+    """Recognize a scan and try alternate layouts/orientations only when the first result is weak."""
+    empty = {"text": "", "title": "", "lines": [], "confidence": 0.0}
     if pytesseract_module is None:
         try:
             import pytesseract as pytesseract_module
         except Exception:
-            return {"text": "", "title": "", "lines": [], "confidence": 0.0}
+            return empty
     if image is None:
-        return {"text": "", "title": "", "lines": [], "confidence": 0.0}
+        return empty
 
     enhanced = threshold = None
     attempts = []
+    rotated_images = []
     try:
         enhanced, threshold = preprocess_image(image)
         first = _recognize_attempt(enhanced, pytesseract_module, 6)
         if first:
             attempts.append(first)
+        first_text_length = len(re.sub(r"\s+", "", first["text"])) if first else 0
         retry_needed = (
             first is None
-            or (len(re.sub(r"\s+", "", first["text"])) < 8 and first["confidence"] < 60)
+            or (first_text_length < 8 and first["confidence"] < 60)
             or first["confidence"] < 30
             or not first["title"]
         )
@@ -214,6 +277,22 @@ def recognize_image(image, pytesseract_module=None) -> dict[str, Any]:
             third = _recognize_attempt(threshold, pytesseract_module, 6)
             if third:
                 attempts.append(third)
+
+        best = max(attempts, key=lambda item: item["quality"]) if attempts else None
+        best_text_length = len(re.sub(r"\s+", "", best["text"])) if best else 0
+        # Rotated photos/scans are expensive to retry, so test them only after weak upright OCR.
+        if best is None or best["confidence"] < 42 or best_text_length < 8:
+            for angle in (90, 180, 270):
+                rotated = enhanced.rotate(angle, expand=True)
+                rotated_images.append(rotated)
+                candidate = _recognize_attempt(rotated, pytesseract_module, 6)
+                if candidate:
+                    attempts.append(candidate)
+                    best = max(attempts, key=lambda item: item["quality"])
+                    best_text_length = len(re.sub(r"\s+", "", best["text"]))
+                    if best["confidence"] >= 62 and best_text_length >= 8 and best["title"]:
+                        break
+
         if attempts:
             best = max(attempts, key=lambda item: item["quality"])
             return {key: best[key] for key in ("text", "title", "lines", "confidence")}
@@ -222,15 +301,14 @@ def recognize_image(image, pytesseract_module=None) -> dict[str, Any]:
         )
         return {"text": fallback or "", "title": "", "lines": [], "confidence": 0.0}
     except Exception:
-        return {"text": "", "title": "", "lines": [], "confidence": 0.0}
+        return empty
     finally:
-        for candidate in (enhanced, threshold):
+        for candidate in (enhanced, threshold, *rotated_images):
             if candidate is not None:
                 try:
                     candidate.close()
                 except Exception:
                     pass
-
 
 def best_title_from_image(image, pytesseract_module=None) -> str:
     return str(recognize_image(image, pytesseract_module).get("title") or "")

@@ -8,7 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from PIL import Image
 from recipe_scanner import (
     MAX_OCR_EDGE, MAX_OCR_PIXELS, best_title_from_pdf_page,
-    lines_from_tesseract_data, preprocess_image, recognize_image, select_title_line,
+    _crop_page_margins, _otsu_threshold, lines_from_tesseract_data,
+    preprocess_image, recognize_image, select_title_line,
 )
 
 
@@ -104,6 +105,65 @@ class RecipeScannerTests(unittest.TestCase):
             image.close()
         self.assertIn("עוגת", result["text"])
         self.assertEqual(fake.image_to_data.call_count, 2)
+
+
+    def test_otsu_threshold_adapts_to_light_and_dark_pixels(self):
+        image = Image.new("L", (200, 100), 245)
+        for x in range(0, 100):
+            for y in range(100):
+                image.putpixel((x, y), 65)
+        try:
+            threshold = _otsu_threshold(image)
+        finally:
+            image.close()
+        self.assertGreaterEqual(threshold, 105)
+        self.assertLessEqual(threshold, 225)
+
+    def test_crop_page_margins_removes_large_blank_borders(self):
+        image = Image.new("L", (900, 900), 255)
+        for x in range(260, 650):
+            for y in range(240, 660):
+                image.putpixel((x, y), 20)
+        cropped = _crop_page_margins(image)
+        try:
+            self.assertLess(cropped.width, image.width * 0.75)
+            self.assertLess(cropped.height, image.height * 0.75)
+        finally:
+            cropped.close()
+            image.close()
+
+    def test_weak_ocr_retries_rotated_page_orientation(self):
+        class FakeOutput:
+            DICT = "dict"
+
+        poor = {
+            "text": ["x"], "conf": ["5"], "left": ["1"], "top": ["1"],
+            "width": ["1"], "height": ["1"], "block_num": ["1"],
+            "par_num": ["1"], "line_num": ["1"],
+        }
+        good = {
+            "text": ["תפוחים", "עוגת"], "conf": ["94", "96"],
+            "left": ["10", "150"], "top": ["35", "35"],
+            "width": ["100", "100"], "height": ["42", "42"],
+            "block_num": ["1", "1"], "par_num": ["1", "1"], "line_num": ["1", "1"],
+        }
+        responses = [poor, poor, poor, good]
+        seen_sizes = []
+
+        def fake_ocr(candidate, **kwargs):
+            seen_sizes.append(candidate.size)
+            return responses.pop(0)
+
+        fake = Mock()
+        fake.Output = FakeOutput
+        fake.image_to_data.side_effect = fake_ocr
+        image = Image.new("RGB", (900, 400), "white")
+        try:
+            result = recognize_image(image, fake)
+        finally:
+            image.close()
+        self.assertIn("עוגת", result["text"])
+        self.assertIn((400, 900), seen_sizes)
 
 
 if __name__ == "__main__":
