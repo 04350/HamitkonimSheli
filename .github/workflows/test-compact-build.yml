@@ -116,9 +116,10 @@ jobs:
             for name,filters in configs:
               archive=out/(name+".7z"); start=time.time()
               with py7zr.SevenZipFile(archive,"w",filters=filters) as z:
-                  # Store relative names only; absolute runner paths are rejected by secure extractors.
-                  for source_file in sorted(p for p in root.rglob("*") if p.is_file()):
-                      z.write(source_file, arcname=source_file.relative_to(root).as_posix())
+                  # Use the same verified py7zr writer pattern as the successful
+                  # full-runtime 7z test: write the EXE, then add the Office tree.
+                  z.write(root / "ספריית_המתכונים_שלי.exe", arcname="ספריית_המתכונים_שלי.exe")
+                  z.writeall(root / "LibreOffice", arcname="LibreOffice")
               elapsed=round(time.time()-start,1)
               with py7zr.SevenZipFile(archive,"r") as z:
                 bad=z.testzip()
