@@ -1,0 +1,192 @@
+name: Validate every Office format in compact release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/test-compact-formats.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  compact-formats:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test libraries and 7-Zip
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "PyMuPDF==2.1" python-docx openpyxl python-pptx pillow striprtf tkinterdnd2 pytesseract
+          $seven = Join-Path $env:ProgramFiles "7-Zip/7z.exe"
+          if (!(Test-Path $seven)) { $seven = (Get-Command 7z.exe -ErrorAction Stop).Source }
+          "SEVENZIP_EXE=$seven" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Download the compact one-file candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: native-7z-compact-candidate
+          path: artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: 42599378417
+
+      - name: Extract the compact archive and validate full Office format support
+        shell: pwsh
+        run: |
+          @'
+          import json, os, shutil, subprocess, sys, tempfile
+          from pathlib import Path
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          from docx import Document
+          import openpyxl
+          from pptx import Presentation
+
+          seven = os.environ["SEVENZIP_EXE"]
+          artifact = Path("artifact")
+          archives = list(artifact.glob("*.7z"))
+          if len(archives) != 1:
+              raise SystemExit(f"Expected exactly one compact 7z file, got: {archives}")
+          package = archives[0]
+          target = Path("compact-extracted").resolve()
+          shutil.rmtree(target, ignore_errors=True)
+          target.mkdir()
+          result = subprocess.run([seven, "x", "-y", f"-o{target}", str(package)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+          if result.returncode:
+              raise RuntimeError("Cannot extract compact archive: " + (result.stdout + result.stderr)[-4000:])
+          exe = target / "ספריית_המתכונים_שלי.exe"
+          office = target / "LibreOffice" / "program" / "soffice.exe"
+          if not exe.is_file() or not office.is_file():
+              raise RuntimeError("Compact package is missing the app EXE or LibreOffice engine.")
+
+          sys.path.insert(0, str(Path("src").resolve()))
+          import ספריית_המתכונים as app
+          if not app.fitz:
+              raise RuntimeError("PyMuPDF unavailable in the test environment.")
+
+          sample_root = Path("all-office-formats")
+          shutil.rmtree(sample_root, ignore_errors=True)
+          sample_root.mkdir()
+          generated = []
+
+          # Create one valid document in each Office family.
+          word = sample_root / "base.docx"
+          doc = Document()
+          doc.add_heading("בדיקת מסמך Word", level=1)
+          doc.add_paragraph("בדיקת תאימות לכל סוגי Word הנתמכים.")
+          doc.save(word)
+
+          excel = sample_root / "base.xlsx"
+          wb = openpyxl.Workbook()
+          wb.active["A1"] = "בדיקת Excel"
+          wb.active["A2"] = 123
+          wb.save(excel)
+
+          slides = sample_root / "base.pptx"
+          prs = Presentation()
+          slide = prs.slides.add_slide(prs.slide_layouts[6])
+          slide.shapes.add_textbox(500000, 500000, 7000000, 1000000).text = "PowerPoint format check"
+          prs.save(slides)
+
+          def convert_format(source, ext, family):
+              if source.suffix.lower() == "." + ext:
+                  return source
+              outdir = sample_root / (family + "-" + ext)
+              outdir.mkdir()
+              profile = sample_root / ("profile-" + family + "-" + ext)
+              command = [
+                  str(office), "--headless", "--nologo", "--nodefault", "--nolockcheck",
+                  f"-env:UserInstallation={profile.resolve().as_uri()}",
+                  "--convert-to", ext, "--outdir", str(outdir), str(source)
+              ]
+              proc = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+              output = outdir / (source.stem + "." + ext)
+              if proc.returncode != 0 or not output.is_file():
+                  raise RuntimeError(f"LibreOffice could not create .{ext} from {source.suffix}: " + (proc.stdout + "\n" + proc.stderr)[-1500:])
+              return output
+
+          tests = [
+              (word, "word", ["doc", "docx", "docm", "odt", "rtf"]),
+              (excel, "excel", ["xls", "xlsx", "xlsm", "ods"]),
+              (slides, "presentation", ["ppt", "pptx", "pptm", "odp"]),
+          ]
+          for base, family, extensions in tests:
+              for ext in extensions:
+                  path = convert_format(base, ext, family)
+                  if not path.is_file() or path.stat().st_size < 100:
+                      raise RuntimeError(f"Generated .{ext} is missing or empty.")
+                  if "." + ext not in app.OFFICE_TYPES:
+                      raise RuntimeError(f"The app no longer lists .{ext} as supported.")
+                  generated.append(path)
+
+          old_executable = sys.executable
+          had_frozen = hasattr(sys, "frozen")
+          old_frozen = getattr(sys, "frozen", None)
+          results = []
+          try:
+              isolated = Path("compact-local-app-data").resolve()
+              os.environ["LOCALAPPDATA"] = str(isolated)
+              sys.executable = str(exe.resolve())
+              sys.frozen = True
+              found = app.find_libreoffice()
+              if not found or Path(found).resolve() != (target / "LibreOffice" / "program" / Path(found).name).resolve():
+                  raise RuntimeError(f"App did not find the LibreOffice engine from the extracted candidate: {found}")
+              for source in generated:
+                  pdf, temp_dir, error = app.convert_office_to_pdf(source)
+                  if error or pdf is None or not pdf.is_file():
+                      raise RuntimeError(f".{source.suffix[1:]} could not be converted by the app: {error}")
+                  try:
+                      with app.fitz.open(pdf) as result:
+                          if result.page_count < 1:
+                              raise RuntimeError(f".{source.suffix[1:]} produced an empty PDF.")
+                          results.append({"extension": source.suffix.lower(), "pages": result.page_count, "pdf_bytes": pdf.stat().st_size})
+                  finally:
+                      if temp_dir:
+                          shutil.rmtree(temp_dir, ignore_errors=True)
+          finally:
+              sys.executable = old_executable
+              if had_frozen:
+                  sys.frozen = old_frozen
+              elif hasattr(sys, "frozen"):
+                  del sys.frozen
+
+          if len(results) != 13:
+              raise RuntimeError(f"Expected 13 Office format tests, completed {len(results)}.")
+          report = {
+              "compact_package_bytes": package.stat().st_size,
+              "compact_package_decimal_mb": round(package.stat().st_size / 1_000_000, 2),
+              "supported_office_extensions": sorted(app.OFFICE_TYPES),
+              "tested_count": len(results),
+              "results": results,
+              "all_office_extensions_converted_to_pdf": True
+          }
+          Path("all-office-formats-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+          print("ALL OFFICE FORMATS PASSED:", json.dumps(report, ensure_ascii=False), flush=True)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw "One or more supported Office format conversions failed" }
+
+      - name: Confirm the same compact app executable starts
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "compact-extracted/ספריית_המתכונים_שלי.exe"
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+          $p.Refresh()
+          if ($p.HasExited) { throw "The compact application exited during startup" }
+          taskkill /PID $p.Id /T /F | Out-Null
+
+      - name: Save expanded compatibility report
+        uses: actions/upload-artifact@v4
+        with:
+          name: compact-office-format-validation
+          path: all-office-formats-report.json
+          if-no-files-found: error
+          retention-days: 30
