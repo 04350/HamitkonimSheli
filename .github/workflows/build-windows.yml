@@ -44,7 +44,7 @@ jobs:
           Copy-Item 'C:\Program Files\Tesseract-OCR\tesseract.exe' tesseract/
           Copy-Item 'C:\Program Files\Tesseract-OCR\*.dll' tesseract/ -ErrorAction SilentlyContinue
           Copy-Item 'C:\Program Files\Tesseract-OCR\tessdata\eng.traineddata' tesseract/tessdata/
-          Invoke-WebRequest -Uri 'https://github.com/tesseract-ocr/tessdata_fast/raw/main/heb.traineddata' -OutFile 'tesseract/tessdata/heb.traineddata'
+          Invoke-WebRequest -Uri 'https://github.com/tesseract-ocr/tessdata_best/raw/main/heb.traineddata' -OutFile 'tesseract/tessdata/heb.traineddata'
 
       - name: בדיקת מנוע OCR בעברית ובאנגלית
         shell: pwsh
@@ -60,7 +60,8 @@ jobs:
           root = Path("tesseract").resolve()
           for required in ("eng.traineddata", "heb.traineddata"):
               data_file = root / "tessdata" / required
-              if not data_file.exists() or data_file.stat().st_size < 100_000:
+              minimum_size = 2_500_000 if required == "heb.traineddata" else 100_000
+              if not data_file.exists() or data_file.stat().st_size < minimum_size:
                   raise SystemExit(f"Missing or invalid language data: {data_file}")
           if not app.configure_ocr():
               raise SystemExit("Tesseract was not found by the application")
