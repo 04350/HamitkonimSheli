@@ -21,18 +21,24 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install app dependencies and native 7-Zip
+      - name: Install verification libraries and locate native 7-Zip
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "PyMuPDF==1.26.7" python-docx striprtf pillow tkinterdnd2 pytesseract openpyxl python-pptx pyinstaller
-          choco install tesseract --no-progress -y
-          choco install 7zip --no-progress -y
-          $seven = (Get-Command 7z.exe -ErrorAction Stop).Source
+          python -m pip install "PyMuPDF==2.1" python-docx striprtf pillow tkinterdnd2 pytesseract openpyxl python-pptx
+          $seven = Join-Path $env:ProgramFiles "7-Zip/7z.exe"
+          if (!(Test-Path $seven)) {
+            $command = Get-Command 7z.exe -ErrorAction SilentlyContinue
+            if ($command) { $seven = $command.Source }
+            else {
+              choco install 7zip --no-progress -y
+              $seven = (Get-Command 7z.exe -ErrorAction Stop).Source
+            }
+          }
           Write-Host "Native 7-Zip: $seven"
           "SEVENZIP_EXE=$seven" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Download verified LibreOffice runtime
+      - name: Download the exact verified v1.11.0 distribution
         uses: actions/download-artifact@v4
         with:
           name: ספריית-המתכונים-שלי-Windows-כולל-Office
@@ -41,50 +47,36 @@ jobs:
           repository: ${{ github.repository }}
           run-id: 42487779118
 
-      - name: Extract and prepare the verified Office runtime
+      - name: Extract the original EXE and complete LibreOffice runtime
         shell: pwsh
         run: |
           $outer = Get-ChildItem source-artifact -Filter "*.zip" -File | Select-Object -First 1
-          if (!$outer) { throw "Verified build artifact missing" }
+          if (!$outer) { throw "Verified v1.11.0 package missing" }
           $unpacked = Join-Path (Get-Location) "source-package"
           Expand-Archive -LiteralPath $outer.FullName -DestinationPath $unpacked -Force
+          $exe = Join-Path $unpacked "ספריית_המתכונים_שלי.exe"
           $officeZip = Join-Path $unpacked "LibreOffice.zip"
-          if (!(Test-Path $officeZip)) { throw "LibreOffice.zip missing" }
-          $lo = Join-Path $env:ProgramFiles "LibreOffice"
-          New-Item -ItemType Directory -Force -Path $lo | Out-Null
-          Expand-Archive -LiteralPath $officeZip -DestinationPath $lo -Force
-          if (!(Test-Path (Join-Path $lo "program/soffice.exe"))) { throw "Office runtime extraction failed" }
-
-      - name: Prepare OCR data and run the complete existing unit suite
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path tesseract/tessdata | Out-Null
-          Copy-Item "C:\Program Files\Tesseract-OCR\tesseract.exe" tesseract/
-          Copy-Item "C:\Program Files\Tesseract-OCR\*.dll" tesseract/ -ErrorAction SilentlyContinue
-          Copy-Item "C:\Program Files\Tesseract-OCR\tessdata\eng.traineddata" tesseract/tessdata/
-          Invoke-WebRequest -Uri "https://github.com/tesseract-ocr/tessdata_fast/raw/main/heb.traineddata" -OutFile "tesseract/tessdata/heb.traineddata"
-          python -m py_compile "src/ספריית_המתכונים.py"
-          python -m unittest discover -s tests -v
-
-      - name: Build the smaller executable
-        shell: pwsh
-        run: |
-          python assets/create_icon.py
-          pyinstaller --noconfirm --clean --onefile --windowed --icon "assets/app_icon.ico" --add-data "assets/app_icon.ico;assets" --name "ספריית_המתכונים_שלי" --collect-all fitz --collect-all PIL --collect-all tkinterdnd2 --collect-all pytesseract --add-data "tesseract;tesseract" --hidden-import striprtf.striprtf --hidden-import docx "src/ספריית_המתכונים.py"
-          if (!(Test-Path "dist/ספריית_המתכונים_שלי.exe")) { throw "EXE was not built" }
-          Write-Host "Compact EXE bytes: $((Get-Item 'dist/ספריית_המתכונים_שלי.exe').Length)"
-
-      - name: Create candidate with selected unused LibreOffice extras removed
-        shell: pwsh
-        run: |
+          if (!(Test-Path $exe) -or !(Test-Path $officeZip)) { throw "Original EXE or LibreOffice.zip missing" }
           $root = Join-Path (Get-Location) "package-root"
           New-Item -ItemType Directory -Force -Path $root | Out-Null
-          Copy-Item "dist/ספריית_המתכונים_שלי.exe" $root
-          Copy-Item (Join-Path $env:ProgramFiles "LibreOffice") (Join-Path $root "LibreOffice") -Recurse
-          Copy-Item "tesseract" (Join-Path $root "tesseract") -Recurse
-          # The recipe app uses LibreOffice only in headless mode for file conversion.
-          # Remove GUI help, clip-art gallery, document templates, and UI extensions.
-          $officeRoot = Join-Path $root "LibreOffice"
+          Copy-Item $exe $root
+          $lo = Join-Path $root "LibreOffice"
+          New-Item -ItemType Directory -Force -Path $lo | Out-Null
+          Expand-Archive -LiteralPath $officeZip -DestinationPath $lo -Force
+          if (!(Test-Path (Join-Path $lo "program/soffice.exe"))) { throw "LibreOffice extraction failed" }
+          @'
+          הפעלת ספריית המתכונים שלי
+          חלצו את כל תוכן קובץ 7z לתיקייה אחת והפעילו את ספריית_המתכונים_שלי.exe.
+          '@ | Set-Content -Encoding UTF8 (Join-Path $root "קראו-לפני-הפעלה.txt")
+          Write-Host "Original EXE bytes: $((Get-Item $exe).Length)"
+
+      - name: Remove only LibreOffice UI extras not used by the app
+        shell: pwsh
+        run: |
+          # The released app uses LibreOffice only as a headless format converter.
+          # Keep the complete program/ engine and conversion filters. Remove editor-only
+          # help pages, clip-art gallery, default templates, and language/UI extensions.
+          $officeRoot = Join-Path (Get-Location) "package-root/LibreOffice"
           foreach ($relative in @("help", "share/gallery", "share/template", "share/extensions")) {
             $candidate = Join-Path $officeRoot $relative
             if (Test-Path $candidate) {
@@ -93,12 +85,9 @@ jobs:
               Write-Host "Removed optional resource $relative : $bytes bytes"
             }
           }
-          @'
-          הפעלת ספריית המתכונים שלי
-          חלצו את כל תוכן קובץ 7z לתיקייה אחת והפעילו את ספריית_המתכונים_שלי.exe.
-          '@ | Set-Content -Encoding UTF8 (Join-Path $root "קראו-לפני-הפעלה.txt")
+          if (!(Test-Path (Join-Path $officeRoot "program/soffice.exe"))) { throw "Required Office executable was removed" }
 
-      - name: Build archive with native 7-Zip, verify extraction and run Office conversions
+      - name: Create one solid archive and verify extraction and Office conversions
         shell: pwsh
         run: |
           @'
@@ -114,11 +103,10 @@ jobs:
           output.mkdir(exist_ok=True)
           seven = os.environ["SEVENZIP_EXE"]
           exe_name = "ספריית_המתכונים_שלי.exe"
-          office_name = "LibreOffice"
           source_exe = root / exe_name
-          source_office = root / office_name
+          source_office = root / "LibreOffice"
           if not source_exe.is_file() or not (source_office / "program" / "soffice.exe").is_file():
-              raise SystemExit("Candidate executable or LibreOffice engine missing.")
+              raise SystemExit("Candidate executable or Office engine missing.")
 
           docs = output / "sample-documents"
           docs.mkdir(exist_ok=True)
@@ -131,105 +119,97 @@ jobs:
           started = time.time()
           proc = subprocess.run(command, cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace")
           if proc.returncode != 0:
-              raise RuntimeError("Native 7-Zip create failed:\n" + (proc.stdout + "\n" + proc.stderr)[-5000:])
+              raise RuntimeError("7-Zip create failed:\n" + (proc.stdout + "\n" + proc.stderr)[-5000:])
           compress_seconds = round(time.time() - started, 1)
           size = archive.stat().st_size
           print(f"NATIVE 7Z SIZE: {size:,} bytes = {size/1_000_000:.2f} MB; under 300MB={size <= 300_000_000}", flush=True)
 
           test = subprocess.run([seven, "t", str(archive)], capture_output=True, text=True, encoding="utf-8", errors="replace")
           if test.returncode != 0 or "Everything is Ok" not in (test.stdout + test.stderr):
-              raise RuntimeError("Native 7-Zip archive test failed:\n" + (test.stdout + "\n" + test.stderr)[-5000:])
+              raise RuntimeError("7-Zip integrity test failed:\n" + (test.stdout + "\n" + test.stderr)[-5000:])
 
           extracted = output / "extracted"
           shutil.rmtree(extracted, ignore_errors=True)
           extracted.mkdir()
           extraction = subprocess.run([seven, "x", "-y", f"-o{extracted}", str(archive)], capture_output=True, text=True, encoding="utf-8", errors="replace")
           if extraction.returncode != 0:
-              raise RuntimeError("Native 7-Zip extraction failed:\n" + (extraction.stdout + "\n" + extraction.stderr)[-5000:])
+              raise RuntimeError("7-Zip extraction failed:\n" + (extraction.stdout + "\n" + extraction.stderr)[-5000:])
 
           def file_map(folder):
               return {p.relative_to(folder).as_posix(): p for p in folder.rglob("*") if p.is_file()}
-          original = file_map(root)
-          restored = file_map(extracted)
+          original, restored = file_map(root), file_map(extracted)
           if set(original) != set(restored):
-              raise RuntimeError(f"File list mismatch after native extraction: missing={sorted(set(original)-set(restored))[:10]}, extra={sorted(set(restored)-set(original))[:10]}")
-          checked = 0
-          for relative, src in original.items():
-              dst = restored[relative]
-              if src.stat().st_size != dst.stat().st_size:
-                  raise RuntimeError(f"Extracted size mismatch: {relative}")
-              def digest(path):
-                  h = hashlib.sha256()
-                  with path.open("rb") as f:
-                      for block in iter(lambda: f.read(4*1024*1024), b""): h.update(block)
-                  return h.hexdigest()
-              if digest(src) != digest(dst):
-                  raise RuntimeError(f"Extracted SHA256 mismatch: {relative}")
-              checked += 1
-          print(f"Native 7-Zip extraction verified: {checked} files have identical SHA256.", flush=True)
+              raise RuntimeError(f"File list mismatch: missing={sorted(set(original)-set(restored))[:10]}, extra={sorted(set(restored)-set(original))[:10]}")
+          def sha(path):
+              digest=hashlib.sha256()
+              with path.open("rb") as stream:
+                  for block in iter(lambda: stream.read(4*1024*1024), b""): digest.update(block)
+              return digest.hexdigest()
+          for relative, source in original.items():
+              target=restored[relative]
+              if source.stat().st_size != target.stat().st_size or sha(source) != sha(target):
+                  raise RuntimeError(f"7-Zip extraction changed file bytes: {relative}")
+          print(f"7-Zip extraction verified: {len(original)} files have identical SHA256.", flush=True)
 
           sys.path.insert(0, str(Path("src").resolve()))
           import ספריית_המתכונים as app
-          old_executable = sys.executable
-          had_frozen = hasattr(sys, "frozen")
-          old_frozen = getattr(sys, "frozen", None)
+          old_executable=sys.executable
+          had_frozen=hasattr(sys,"frozen")
+          old_frozen=getattr(sys,"frozen",None)
           try:
-              app_exe = extracted / exe_name
-              os.environ["LOCALAPPDATA"] = str(output / "isolated-local-appdata")
-              sys.executable = str(app_exe.resolve())
-              sys.frozen = True
-              engine = app.find_libreoffice()
+              app_exe=extracted/exe_name
+              os.environ["LOCALAPPDATA"]=str(output/"isolated-local-appdata")
+              sys.executable=str(app_exe.resolve())
+              sys.frozen=True
+              engine=app.find_libreoffice()
               if engine is None or not engine.is_file():
-                  raise RuntimeError("The app could not find its extracted LibreOffice engine.")
-              print("App found LibreOffice:", engine, flush=True)
-              conversions = []
+                  raise RuntimeError("App cannot discover its bundled LibreOffice.")
+              conversions=[]
               for sample in sorted(docs.iterdir()):
-                  pdf, temp_dir, error = app.convert_office_to_pdf(sample)
+                  pdf,temp_dir,error=app.convert_office_to_pdf(sample)
                   if error or pdf is None or not pdf.is_file():
-                      raise RuntimeError(f"{sample.suffix} -> PDF failed: {error}")
+                      raise RuntimeError(f"{sample.suffix} to PDF failed: {error}")
                   try:
                       with app.fitz.open(pdf) as result:
-                          if result.page_count < 1: raise RuntimeError(f"{sample.suffix}: empty PDF")
+                          if result.page_count<1: raise RuntimeError(f"{sample.suffix} generated an empty PDF")
                           conversions.append(f"{sample.suffix.upper()} -> PDF ({result.page_count} page)")
                   finally:
-                      if temp_dir: shutil.rmtree(temp_dir, ignore_errors=True)
-              print("Office conversions:", ", ".join(conversions), flush=True)
+                      if temp_dir: shutil.rmtree(temp_dir,ignore_errors=True)
+              print("Application Office conversions:", ", ".join(conversions), flush=True)
           finally:
-              sys.executable = old_executable
-              if had_frozen: sys.frozen = old_frozen
-              elif hasattr(sys, "frozen"): del sys.frozen
+              sys.executable=old_executable
+              if had_frozen: sys.frozen=old_frozen
+              elif hasattr(sys,"frozen"): del sys.frozen
 
-          report = {
-              "pymupdf": __import__("fitz").VersionBind,
-              "exe_bytes": source_exe.stat().st_size,
-              "archive_bytes": size,
-              "archive_decimal_mb": round(size/1_000_000, 2),
-              "under_300mb": size <= 300_000_000,
-              "solid_lzma2": True,
-              "file_count": checked,
-              "all_extracted_file_hashes_identical": True,
-              "office_conversions": conversions,
-              "compression_seconds": compress_seconds,
-              "optional_dirs_removed": ["help", "share/gallery", "share/template", "share/extensions"]
+          report={
+              "original_exe_preserved":True,
+              "exe_bytes":source_exe.stat().st_size,
+              "archive_bytes":size,
+              "archive_decimal_mb":round(size/1_000_000,2),
+              "under_300mb":size<=300_000_000,
+              "solid_lzma2":True,
+              "file_count":len(original),
+              "all_extracted_file_hashes_identical":True,
+              "office_conversions":conversions,
+              "compression_seconds":compress_seconds,
+              "optional_dirs_removed":["help","share/gallery","share/template","share/extensions"]
           }
-          (output / "compact-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-          print("FINAL REPORT:", json.dumps(report, ensure_ascii=False), flush=True)
-          if size > 300_000_000:
-              print("NOTE: Package passed integrity and functionality checks but is still above 300 MB.", flush=True)
+          (output/"compact-report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("FINAL REPORT:",json.dumps(report,ensure_ascii=False),flush=True)
           '@ | python -
-          if ($LASTEXITCODE -ne 0) { throw "Native 7-Zip package test failed" }
+          if ($LASTEXITCODE -ne 0) { throw "Native 7-Zip candidate validation failed" }
 
-      - name: Verify the packaged application opens
+      - name: Verify the released application opens from the extracted candidate
         shell: pwsh
         run: |
-          $exe = Resolve-Path "package-root/ספריית_המתכונים_שלי.exe"
+          $exe = Resolve-Path "native-7z-output/extracted/ספריית_המתכונים_שלי.exe"
           $p = Start-Process -FilePath $exe -PassThru
           Start-Sleep -Seconds 8
           $p.Refresh()
-          if ($p.HasExited) { throw "Packaged application exited during startup" }
+          if ($p.HasExited) { throw "Application exited during startup after extraction" }
           taskkill /PID $p.Id /T /F | Out-Null
 
-      - name: Upload compact candidate and report
+      - name: Upload the single-file compact candidate and report
         uses: actions/upload-artifact@v4
         with:
           name: native-7z-compact-candidate
