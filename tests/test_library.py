@@ -14,6 +14,88 @@ from openpyxl import Workbook
 from pptx import Presentation
 
 class בדיקותספרייה(unittest.TestCase):
+    def test_libreoffice_חילוץ_עם_התקדמות_ועדכון_גרסה(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = temp
+                root = Path(temp)
+                first_archive = root / "office-v1.zip"
+                second_archive = root / "office-v2.zip"
+
+                def make_archive(target, version):
+                    with app.zipfile.ZipFile(target, "w", compression=app.zipfile.ZIP_DEFLATED) as archive:
+                        archive.writestr("program/soffice.exe", b"test-office-executable")
+                        archive.writestr("program/soffice.com", b"test-office-console")
+                        archive.writestr(".recipe-library-version", version)
+
+                make_archive(first_archive, "26.2.6.1")
+                progress = []
+                executable = app._extract_portable_libreoffice(
+                    first_archive,
+                    progress_callback=lambda phase, current, total: progress.append((phase, current, total)) or True,
+                )
+                self.assertIsNotNone(executable)
+                self.assertTrue(executable.is_file())
+                self.assertEqual(progress[-1], ("extracting", 3, 3))
+
+                installed = executable.parents[1]
+                marker = installed / ".recipe-library-version"
+                self.assertEqual(marker.read_text(encoding="utf-8"), "26.2.6.1")
+                sentinel = installed / "keep-if-cache-hit.txt"
+                sentinel.write_text("cached", encoding="utf-8")
+
+                same_executable = app._extract_portable_libreoffice(first_archive)
+                self.assertEqual(same_executable, executable)
+                self.assertTrue(sentinel.exists(), "same-version cache hit should not re-extract files")
+
+                make_archive(second_archive, "26.2.7.0")
+                updated = app._extract_portable_libreoffice(second_archive)
+                self.assertTrue(updated.is_file())
+                self.assertFalse(sentinel.exists(), "a changed version should replace the old runtime")
+                self.assertEqual(marker.read_text(encoding="utf-8"), "26.2.7.0")
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_מטמון_קטגוריות_תיקיות_ואינדקסים_מתעדכן(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "recipe.txt"
+                source.write_text("עוגת תפוחים\nמצרכים:\n2 תפוחים\nאופן ההכנה:\nמערבבים", encoding="utf-8")
+                library = app.RecipeLibrary()
+                added, _ = library.import_one(source, relative_folder="קינוחים/עוגות")
+                self.assertTrue(added)
+                self.assertIn("קינוחים", library.all_source_folders())
+                self.assertIn("קינוחים/עוגות", library.all_source_folders())
+                self.assertIn("קינוחים/עוגות", library.all_categories())
+                item_id = int(library.rows()[0]["id"])
+                library.set_item_tags(item_id, ["חלבי", "שבת"])
+                self.assertEqual(library.tags_by_item([item_id]), {item_id: ["חלבי", "שבת"]})
+
+                indexes = {
+                    row["name"] for row in library.db.execute("PRAGMA index_list(items)").fetchall()
+                }
+                self.assertIn("idx_items_active_id", indexes)
+                self.assertIn("idx_items_favorite_id", indexes)
+
+                library.move_to_recycle_bin(item_id)
+                self.assertEqual(library.all_categories(), [])
+                self.assertEqual(library.all_source_folders(), [])
+                library.restore_from_recycle_bin(item_id)
+                self.assertIn("קינוחים/עוגות", library.all_categories())
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_ניקוי_חיפוש_עברית_וניקוד(self):
     def test_ניקוי_חיפוש_עברית_וניקוד(self):
         self.assertEqual(app.normalize("עוגת שׁוֹקוֹלָד!"), app.normalize("עוגת שוקולד"))
 

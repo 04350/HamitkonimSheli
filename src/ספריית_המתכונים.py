@@ -60,7 +60,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.13.0"
 def _rounded_points(x1, y1, x2, y2, radius=14, steps=8):
     """Create a polygon outline with smooth rounded corners."""
     width = max(1, x2 - x1)
@@ -252,14 +252,35 @@ DOCUMENT_TYPES = {".pdf", ".html", ".htm"} | OFFICE_TYPES | EBOOK_TYPES
 MAX_FILE_SIZE = 250 * 1024 * 1024
 MAX_TEXT_LENGTH = 400_000
 
-def _extract_portable_libreoffice(archive_path: Path) -> Path | None:
-    """Extract the single bundled LibreOffice archive to local app data on first use."""
+def _portable_libreoffice_archive_version(archive_path: Path) -> str:
+    """Read the tiny build marker stored inside the bundled Office ZIP."""
+    try:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            try:
+                value = archive.read(".recipe-library-version").decode("utf-8", errors="replace").strip()
+                return value or "legacy"
+            except KeyError:
+                return "legacy"
+    except (OSError, zipfile.BadZipFile):
+        return "legacy"
+
+
+def _extract_portable_libreoffice(archive_path: Path, progress_callback=None) -> Path | None:
+    """Extract or update the bundled Office runtime; cached versions are left untouched."""
     base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
     runtime_root = base / APP_NAME / "רכיבים"
     target = runtime_root / "LibreOffice"
+    bundle_version = _portable_libreoffice_archive_version(archive_path)
+    marker_name = ".recipe-library-version"
+    marker_path = target / marker_name
+    try:
+        existing_version = marker_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        existing_version = ""
+
     for executable_name in ("soffice.com", "soffice.exe"):
         existing = target / "program" / executable_name
-        if existing.is_file():
+        if existing.is_file() and existing_version == bundle_version:
             return existing
 
     runtime_root.mkdir(parents=True, exist_ok=True)
@@ -273,7 +294,8 @@ def _extract_portable_libreoffice(archive_path: Path) -> Path | None:
             if total_size > 3 * 1024 * 1024 * 1024:
                 raise ValueError("ארכיון LibreOffice גדול מהמגבלה המותרת.")
             root_resolved = staging.resolve()
-            for info in members:
+            total_members = len(members)
+            for index, info in enumerate(members, 1):
                 name = info.filename.replace("\\", "/")
                 parts = [part for part in name.split("/") if part not in ("", ".")]
                 if not parts or name.startswith("/") or any(part == ".." or ":" in part for part in parts):
@@ -283,12 +305,16 @@ def _extract_portable_libreoffice(archive_path: Path) -> Path | None:
                     raise ValueError("ארכיון LibreOffice מנסה לכתוב מחוץ לתיקיית החילוץ.")
                 if info.is_dir():
                     destination.mkdir(parents=True, exist_ok=True)
-                    continue
-                if ((info.external_attr >> 16) & 0o170000) == 0o120000:
-                    raise ValueError("ארכיון LibreOffice מכיל קישור סמלי שאינו נתמך.")
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(info, "r") as source, destination.open("wb") as output:
-                    shutil.copyfileobj(source, output, length=1024 * 1024)
+                else:
+                    if ((info.external_attr >> 16) & 0o170000) == 0o120000:
+                        raise ValueError("ארכיון LibreOffice מכיל קישור סמלי שאינו נתמך.")
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(info, "r") as source, destination.open("wb") as output:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
+
+                if progress_callback and (index % 100 == 0 or index == total_members):
+                    if progress_callback("extracting", index, total_members) is False:
+                        raise InterruptedError("חילוץ LibreOffice בוטל.")
 
         executable = next(
             (staging / "program" / name for name in ("soffice.com", "soffice.exe")
@@ -297,6 +323,7 @@ def _extract_portable_libreoffice(archive_path: Path) -> Path | None:
         )
         if executable is None:
             raise ValueError("לא נמצא soffice בתוך ארכיון LibreOffice.")
+        (staging / marker_name).write_text(bundle_version, encoding="utf-8")
         if target.exists():
             shutil.rmtree(target, ignore_errors=True)
         os.replace(staging, target)
@@ -309,9 +336,8 @@ def _extract_portable_libreoffice(archive_path: Path) -> Path | None:
         shutil.rmtree(staging, ignore_errors=True)
         raise
 
-
-def find_libreoffice() -> Path | None:
-    """Find a folder, a portable ZIP archive, or a system LibreOffice installation."""
+def find_libreoffice(progress_callback=None) -> Path | None:
+    """Find a folder, a version-matched portable ZIP archive, or a system installation."""
     names = ("soffice.com", "soffice.exe")
     roots: list[Path] = []
     if getattr(sys, "frozen", False):
@@ -329,10 +355,11 @@ def find_libreoffice() -> Path | None:
     for root in roots:
         archive_path = root / "LibreOffice.zip"
         if archive_path.is_file():
-            try:
-                return _extract_portable_libreoffice(archive_path)
-            except Exception:
-                return None
+            if progress_callback:
+                progress_callback("checking", 0, 0)
+            return _extract_portable_libreoffice(
+                archive_path, progress_callback=progress_callback
+            )
 
     for root in (Path(os.environ.get("PROGRAMFILES", "C:/Program Files")),
                  Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)"))):
@@ -347,7 +374,11 @@ def find_libreoffice() -> Path | None:
     return None
 
 
-def convert_office_to_pdf(source: Path, timeout: int = 180) -> tuple[Path | None, Path | None, str]:
+def convert_office_to_pdf(
+    source: Path,
+    timeout: int = 180,
+    progress_callback=None,
+) -> tuple[Path | None, Path | None, str]:
     """Convert an Office document to a temporary PDF without showing LibreOffice's UI.
 
     Returns (pdf_path, temporary_directory, error_message). The caller owns
@@ -359,7 +390,7 @@ def convert_office_to_pdf(source: Path, timeout: int = 180) -> tuple[Path | None
         return None, None, "סוג הקובץ אינו נתמך להמרה."
     if not source.is_file():
         return None, None, "הקובץ לא נמצא."
-    executable = find_libreoffice()
+    executable = find_libreoffice(progress_callback=progress_callback)
     if executable is None:
         return None, None, "מנוע התצוגה של Office לא נמצא. יש לוודא שתיקיית LibreOffice נמצאת לצד קובץ התוכנה."
 
@@ -369,6 +400,8 @@ def convert_office_to_pdf(source: Path, timeout: int = 180) -> tuple[Path | None
     output_directory.mkdir()
     profile_directory.mkdir()
     output_pdf = output_directory / (source.stem + ".pdf")
+    if progress_callback and progress_callback("converting", 0, 0) is False:
+        return None, None, "הפעולה בוטלה."
     command = [
         str(executable),
         "--headless",
@@ -764,6 +797,15 @@ def text_similarity(left: str, right: str) -> float:
     return max(word_score, pair_score)
 
 
+def _recipe_data_from_row(row) -> dict:
+    """Decode recipe metadata already selected with the item row, without another SQL query."""
+    try:
+        value = json.loads(row["recipe_data"] or "{}")
+        return value if isinstance(value, dict) else {}
+    except (KeyError, TypeError, ValueError, IndexError):
+        return {}
+
+
 class RecipeLibrary:
     def __init__(self):
         self.home = data_home()
@@ -776,6 +818,7 @@ class RecipeLibrary:
         self.db_path = self.home / "הספרייה.sqlite3"
         self.db = sqlite3.connect(self.db_path)
         self.db.row_factory = sqlite3.Row
+        self._recipe_options_cache = None
         self._ensure_schema()
 
     def _ensure_schema(self):
@@ -842,6 +885,9 @@ class RecipeLibrary:
                 value TEXT NOT NULL
             )
         """)
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_items_active_id ON items(is_deleted, id DESC)")
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_items_favorite_id ON items(is_deleted, is_favorite, id DESC)")
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_item_collections_collection_item ON item_collections(collection_id, item_id)")
         self.db.commit()
 
     def rows(self, favorite_only: bool = False, collection_id: int | None = None, include_deleted: bool = False):
@@ -871,6 +917,7 @@ class RecipeLibrary:
             (datetime.now().strftime("%d/%m/%Y %H:%M"), int(item_id))
         )
         self.db.commit()
+        self._invalidate_recipe_options()
 
     def restore_from_recycle_bin(self, item_id: int):
         self.db.execute(
@@ -878,6 +925,7 @@ class RecipeLibrary:
             (int(item_id),)
         )
         self.db.commit()
+        self._invalidate_recipe_options()
 
     def permanently_delete(self, item_id: int):
         row = self.db.execute(
@@ -887,6 +935,7 @@ class RecipeLibrary:
             Path(row["stored_path"]).unlink(missing_ok=True)
             self.db.execute("DELETE FROM items WHERE id=?", (int(item_id),))
             self.db.commit()
+            self._invalidate_recipe_options()
 
     def set_favorite(self, item_id: int, is_favorite: bool):
         self.db.execute(
@@ -932,19 +981,38 @@ class RecipeLibrary:
             (json.dumps(clean, ensure_ascii=False), int(item_id))
         )
         self.db.commit()
+        self._invalidate_recipe_options()
+
+    def _invalidate_recipe_options(self):
+        self._recipe_options_cache = None
+
+    def _recipe_option_values(self):
+        if self._recipe_options_cache is None:
+            folders = set()
+            categories = set()
+            for row in self.db.execute("SELECT recipe_data FROM items WHERE is_deleted=0"):
+                try:
+                    data = json.loads(row["recipe_data"] or "{}")
+                    if not isinstance(data, dict):
+                        continue
+                    folder = str(data.get("source_folder") or "").strip("/")
+                    category = str(data.get("category") or "").strip()
+                except (ValueError, AttributeError, TypeError):
+                    continue
+                if category:
+                    categories.add(category)
+                if folder:
+                    parts = folder.split("/")
+                    for index in range(1, len(parts) + 1):
+                        folders.add("/".join(parts[:index]))
+            self._recipe_options_cache = (
+                tuple(sorted(categories, key=str.casefold)),
+                tuple(sorted(folders, key=lambda value: (value.count("/"), value.casefold()))),
+            )
+        return self._recipe_options_cache
 
     def all_source_folders(self) -> list[str]:
-        folders = set()
-        for row in self.db.execute("SELECT recipe_data FROM items WHERE is_deleted=0"):
-            try:
-                folder = str(json.loads(row["recipe_data"] or "{}").get("source_folder") or "").strip("/")
-            except (ValueError, AttributeError, TypeError):
-                folder = ""
-            if folder:
-                parts = folder.split("/")
-                for index in range(1, len(parts) + 1):
-                    folders.add("/".join(parts[:index]))
-        return sorted(folders, key=lambda value: (value.count("/"), value.casefold()))
+        return list(self._recipe_option_values()[1])
 
     def tag_names(self, item_id: int) -> list[str]:
         rows = self.db.execute("""
@@ -954,19 +1022,31 @@ class RecipeLibrary:
         """, (int(item_id),)).fetchall()
         return [row["name"] for row in rows]
 
+    def tags_by_item(self, item_ids) -> dict[int, list[str]]:
+        """Load tags for many items in a few queries instead of one query per recipe."""
+        ids = list(dict.fromkeys(int(item_id) for item_id in item_ids))
+        result = {item_id: [] for item_id in ids}
+        for start in range(0, len(ids), 800):
+            chunk = ids[start:start + 800]
+            if not chunk:
+                continue
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.db.execute(
+                f"SELECT item_tags.item_id, tags.name FROM item_tags "
+                f"INNER JOIN tags ON tags.id=item_tags.tag_id "
+                f"WHERE item_tags.item_id IN ({placeholders}) "
+                "ORDER BY tags.name COLLATE NOCASE",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                result[int(row["item_id"])].append(row["name"])
+        return result
+
     def all_tags(self) -> list[str]:
         return [row["name"] for row in self.db.execute("SELECT name FROM tags ORDER BY name COLLATE NOCASE")]
 
     def all_categories(self) -> list[str]:
-        values = set()
-        for row in self.db.execute("SELECT recipe_data FROM items WHERE is_deleted=0"):
-            try:
-                category = json.loads(row["recipe_data"] or "{}").get("category", "").strip()
-            except (ValueError, AttributeError):
-                category = ""
-            if category:
-                values.add(category)
-        return sorted(values, key=str.casefold)
+        return list(self._recipe_option_values()[0])
 
     def set_item_tags(self, item_id: int, names):
         cleaned = []
@@ -1094,6 +1174,7 @@ class RecipeLibrary:
                 self.db = sqlite3.connect(self.db_path)
                 self.db.row_factory = sqlite3.Row
                 self._ensure_schema()
+                self._invalidate_recipe_options()
             except Exception:
                 try:
                     if hasattr(self, "db"):
@@ -1253,6 +1334,7 @@ class RecipeLibrary:
                  json.dumps(prepared.get("recipe_data") or {}, ensure_ascii=False))
             )
             self.db.commit()
+            self._invalidate_recipe_options()
         except Exception:
             target.unlink(missing_ok=True)
             raise
@@ -1269,6 +1351,7 @@ class RecipeLibrary:
             Path(row["stored_path"]).unlink(missing_ok=True)
             self.db.execute("DELETE FROM items WHERE id=?", (item_id,))
             self.db.commit()
+            self._invalidate_recipe_options()
 
     def rename(self, item_id: int, title: str):
         row = self.db.execute("SELECT stored_path FROM items WHERE id=?", (item_id,)).fetchone()
@@ -2097,7 +2180,7 @@ class App:
             )
             self.gallery_cards[item_id] = card
             body = card.content
-            data = self.library.get_recipe_data(row["id"])
+            data = _recipe_data_from_row(row)
             image_path = str(data.get("image_path") or "")
             if not image_path and row["extension"].lower() in IMAGE_TYPES:
                 image_path = row["stored_path"]
@@ -2265,18 +2348,29 @@ class App:
         tag_filter = self.tag_filter_value.get()
         date_from = self._parse_date_filter(self.date_from_value.get())
         date_to = self._parse_date_filter(self.date_to_value.get())
+        folder_filter = self.folder_filter_value.get()
+        recipe_filter = self.recipe_filter_value.get()
+        sort_mode = self.sort_value.get()
+        need_file_size = self.view_mode.get() == "רשימה" or sort_mode == "גודל: גדול לקטן"
+        tags_by_item = (
+            self.library.tags_by_item(row["id"] for row in rows)
+            if tag_filter != "כל התגיות" or query else {}
+        )
+        recipe_by_id = {}
         ranked = []
         for row in rows:
             kind = file_kind(row["extension"])
             if type_filter != "כל הסוגים" and kind != type_filter:
                 continue
-            recipe = self.library.get_recipe_data(row["id"])
-            category = recipe.get("category", "")
+            recipe = _recipe_data_from_row(row)
+            item_id = int(row["id"])
+            recipe_by_id[item_id] = recipe
+            category = str(recipe.get("category") or "")
             folder_path = str(recipe.get("source_folder") or "").strip("/")
-            folder_filter = self.folder_filter_value.get()
-            if folder_filter != "כל התיקיות" and not (folder_path == folder_filter or folder_path.startswith(folder_filter + "/")):
+            if folder_filter != "כל התיקיות" and not (
+                folder_path == folder_filter or folder_path.startswith(folder_filter + "/")
+            ):
                 continue
-            recipe_filter = self.recipe_filter_value.get()
             is_recipe = is_recipe_record(recipe, row["content"] or "")
             if recipe_filter == "מתכונים בלבד" and not is_recipe:
                 continue
@@ -2286,25 +2380,29 @@ class App:
                 continue
             if category_filter != "כל הקטגוריות" and category != category_filter:
                 continue
-            if tag_filter != "כל התגיות" and tag_filter not in self.library.tag_names(row["id"]):
+            item_tags = tags_by_item.get(item_id, [])
+            if tag_filter != "כל התגיות" and tag_filter not in item_tags:
                 continue
             imported = self._parse_imported_date(row["imported_at"])
             if date_from and (imported is None or imported.date() < date_from):
                 continue
             if date_to and (imported is None or imported.date() > date_to):
                 continue
-            item_tags = self.library.tag_names(row["id"])
-            search_text = recipe_search_text(
-                row["title"], row["content"], recipe, item_tags
+            score = 1 if not query else relevance(
+                row["title"],
+                recipe_search_text(row["title"], row["content"], recipe, item_tags),
+                query,
             )
-            score = relevance(row["title"], search_text, query)
             if score > 0:
-                try:
-                    file_size = Path(row["stored_path"]).stat().st_size
-                except OSError:
+                if need_file_size:
+                    try:
+                        file_size = Path(row["stored_path"]).stat().st_size
+                    except OSError:
+                        file_size = 0
+                else:
                     file_size = 0
                 ranked.append((score, row, file_size, imported))
-        sort_mode = self.sort_value.get()
+
         if sort_mode == "שם: א-ת":
             ranked.sort(key=lambda x: x[1]["title"].casefold())
         elif sort_mode == "שם: ת-א":
@@ -2317,8 +2415,8 @@ class App:
             ranked.sort(key=lambda x: x[2], reverse=True)
         elif sort_mode == "דירוג: גבוה לנמוך":
             ranked.sort(
-                key=lambda x: int(self.library.get_recipe_data(x[1]["id"]).get("rating") or 0)
-                if str(self.library.get_recipe_data(x[1]["id"]).get("rating") or "0").isdigit() else 0,
+                key=lambda x: int(recipe_by_id.get(int(x[1]["id"]), {}).get("rating") or 0)
+                if str(recipe_by_id.get(int(x[1]["id"]), {}).get("rating") or "0").isdigit() else 0,
                 reverse=True
             )
         elif sort_mode == "נצפו לאחרונה":
@@ -2328,29 +2426,32 @@ class App:
         else:
             ranked.sort(key=lambda x: (x[3] or datetime.min, x[1]["id"]), reverse=True)
 
+        ranked_ids = {str(entry[1]["id"]) for entry in ranked}
         if (
             ranked
             and self.current_page in ("recipes", "favorites")
-            and str(selected_id or "") not in {str(entry[1]["id"]) for entry in ranked}
+            and str(selected_id or "") not in ranked_ids
         ):
             selected_id = str(ranked[0][1]["id"])
 
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        self.current_rows = {}
-        for index, (_score, row, file_size, _imported) in enumerate(ranked):
-            iid = str(row["id"])
-            self.current_rows[iid] = row
-            star = "★" if row["is_favorite"] else ""
-            if file_size >= 1024 * 1024:
-                size_label = f"{file_size / (1024 * 1024):.1f} MB"
-            else:
-                size_label = f"{max(1, file_size // 1024)} KB"
-            self.tree.insert(
-                "", "end", iid=iid,
-                values=(star, row["imported_at"], file_kind(row["extension"]), size_label, row["title"]),
-                tags=("even" if index % 2 == 0 else "odd",)
-            )
+        existing_tree_items = self.tree.get_children()
+        if existing_tree_items:
+            self.tree.delete(*existing_tree_items)
+        self.current_rows = {str(entry[1]["id"]): entry[1] for entry in ranked}
+        if self.view_mode.get() == "רשימה":
+            for index, (_score, row, file_size, _imported) in enumerate(ranked):
+                iid = str(row["id"])
+                star = "★" if row["is_favorite"] else ""
+                if file_size >= 1024 * 1024:
+                    size_label = f"{file_size / (1024 * 1024):.1f} MB"
+                else:
+                    size_label = f"{max(1, file_size // 1024)} KB"
+                self.tree.insert(
+                    "", "end", iid=iid,
+                    values=(star, row["imported_at"], file_kind(row["extension"]), size_label, row["title"]),
+                    tags=("even" if index % 2 == 0 else "odd",)
+                )
+
         self._render_gallery(ranked)
         if hasattr(self, "count_label"):
             self.count_label.configure(text=f"{len(ranked)} מתכונים")
@@ -3805,21 +3906,24 @@ class App:
             self.refresh()
 
     def show_viewer(self, path: Path, title: str, content: str = ""):
-        """Open a file preview as an in-app page with original/text switching."""
+        """Open a file preview; Office extraction and conversion run off the UI thread."""
         path = Path(path)
         window = self._push_embedded_page(title)
         suffix = path.suffix.lower()
-        preview_path = path
-        temporary_directory = None
-        notice = ""
-        if suffix in OFFICE_TYPES:
-            preview_path, temporary_directory, notice = convert_office_to_pdf(path)
-
+        is_office = suffix in OFFICE_TYPES
+        office_state = {
+            "loading": is_office,
+            "preview_path": path,
+            "temporary_directory": None,
+            "mode": "source",
+            "closed": threading.Event(),
+        }
+        office_events: queue.Queue = queue.Queue()
         document_state = {"document": None}
         content_host = tk.Frame(window, bg=self.colors["background"])
         content_host.pack(fill="both", expand=True, padx=18, pady=(0, 18))
         extracted_text = content or ""
-        if not extracted_text:
+        if not extracted_text and not is_office:
             try:
                 extracted_text = extract_text(path)
             except Exception as exc:
@@ -3837,9 +3941,12 @@ class App:
                 child.destroy()
 
         def close_preview():
+            office_state["closed"].set()
             clear_content()
+            temporary_directory = office_state.get("temporary_directory")
             if temporary_directory is not None:
                 shutil.rmtree(temporary_directory, ignore_errors=True)
+                office_state["temporary_directory"] = None
             self._pop_embedded_page(window)
 
         self._embedded_header(
@@ -3849,13 +3956,52 @@ class App:
 
         controls = tk.Frame(window, bg=self.colors["background"], padx=20, pady=(0, 9))
         controls.pack(fill="x")
-        if notice:
-            ttk.Label(
-                controls, text=notice, foreground="#9A4B18",
-                background="#FFF4E5", padding=8, wraplength=1100, justify="right"
-            ).pack(fill="x", pady=(0, 8))
+        notice_label = ttk.Label(
+            controls, foreground="#9A4B18",
+            background="#FFF4E5", padding=8, wraplength=1100, justify="right"
+        )
+
+        progress_frame = ttk.Frame(controls, style="App.TFrame")
+        progress_text = tk.StringVar(value="מכין את מנוע Office בפעם הראשונה…")
+        progress_label = ttk.Label(progress_frame, textvariable=progress_text, style="Muted.TLabel", anchor="e")
+        progress_label.pack(fill="x", pady=(0, 4))
+        progress_bar = ttk.Progressbar(progress_frame, mode="indeterminate")
+        progress_bar.pack(fill="x")
+        if is_office:
+            progress_frame.pack(fill="x", pady=(0, 8))
+            progress_bar.start(12)
+
+        def set_notice(value: str):
+            if value:
+                notice_label.configure(text=value)
+                if not notice_label.winfo_manager():
+                    notice_label.pack(fill="x", pady=(0, 8))
+            else:
+                notice_label.pack_forget()
+
+        def update_office_progress(phase: str, current: int = 0, total: int = 0):
+            if office_state["closed"].is_set():
+                return
+            try:
+                if phase == "extracting":
+                    progress_bar.stop()
+                    progress_bar.configure(mode="determinate", maximum=max(1, total), value=current)
+                    progress_text.set(f"מחלץ רכיבי Office: {current:,} מתוך {total:,} קבצים")
+                elif phase == "converting":
+                    progress_bar.stop()
+                    progress_bar.configure(mode="indeterminate")
+                    progress_bar.start(12)
+                    progress_text.set("ממיר את המסמך לתצוגה…")
+                else:
+                    progress_bar.stop()
+                    progress_bar.configure(mode="indeterminate")
+                    progress_bar.start(12)
+                    progress_text.set("בודק ומכין את מנוע Office…")
+            except tk.TclError:
+                pass
 
         def render_preview(mode):
+            office_state["mode"] = mode
             clear_content()
             if mode == "text":
                 self._show_text_in_viewer(
@@ -3867,14 +4013,104 @@ class App:
 
             text_button.set_active(False)
             source_button.set_active(True)
+            if is_office and office_state["loading"]:
+                ttk.Label(
+                    content_host,
+                    text="מכין את מנוע Office ואת תצוגת המסמך…\nאפשר להמשיך להשתמש בחלונית הטקסט בזמן ההכנה.",
+                    style="Panel.TLabel", justify="center"
+                ).pack(expand=True, pady=36)
+                return
+
+            preview_path = office_state["preview_path"]
             if suffix in IMAGE_TYPES and Image is not None:
                 self._show_image_in_viewer(content_host, path)
-            elif (suffix == ".pdf" or suffix in EBOOK_TYPES or preview_path != path) and fitz is not None and Image is not None:
+            elif (
+                suffix == ".pdf" or suffix in EBOOK_TYPES
+                or (is_office and preview_path != path)
+            ) and fitz is not None and Image is not None and ImageTk is not None:
                 document_state["document"] = self._show_pdf_in_viewer(content_host, preview_path, window)
             else:
+                fallback = notice_label.cget("text") if notice_label.winfo_manager() else ""
                 self._show_text_in_viewer(
-                    content_host, extracted_text or "אין לקובץ זה תצוגה חזותית זמינה."
+                    content_host, extracted_text or fallback or "אין לקובץ זה תצוגה חזותית זמינה."
                 )
+
+        def office_worker():
+            def report(phase, current=0, total=0):
+                if office_state["closed"].is_set():
+                    return False
+                office_events.put({
+                    "kind": "progress", "phase": phase,
+                    "current": current, "total": total,
+                })
+                return True
+
+            temporary_directory = None
+            try:
+                report("checking")
+                converted_path, temporary_directory, notice = convert_office_to_pdf(
+                    path, progress_callback=report
+                )
+                try:
+                    text_value = content or extract_text(path)
+                except Exception as exc:
+                    text_value = f"לא ניתן לחלץ טקסט מהקובץ: {exc}"
+                if office_state["closed"].is_set():
+                    if temporary_directory is not None:
+                        shutil.rmtree(temporary_directory, ignore_errors=True)
+                    return
+                office_events.put({
+                    "kind": "done",
+                    "preview_path": converted_path or path,
+                    "temporary_directory": temporary_directory,
+                    "notice": notice,
+                    "text": text_value,
+                })
+            except Exception as exc:
+                if temporary_directory is not None:
+                    shutil.rmtree(temporary_directory, ignore_errors=True)
+                if not office_state["closed"].is_set():
+                    office_events.put({
+                        "kind": "done", "preview_path": path,
+                        "temporary_directory": None,
+                        "notice": f"לא ניתן להכין תצוגת Office: {exc}",
+                        "text": content or "",
+                    })
+
+        def poll_office_events():
+            if office_state["closed"].is_set():
+                return
+            finished = False
+            try:
+                while True:
+                    event = office_events.get_nowait()
+                    if event.get("kind") == "progress":
+                        update_office_progress(
+                            event.get("phase", "checking"),
+                            event.get("current", 0), event.get("total", 0)
+                        )
+                    elif event.get("kind") == "done":
+                        office_state["loading"] = False
+                        office_state["preview_path"] = event.get("preview_path") or path
+                        office_state["temporary_directory"] = event.get("temporary_directory")
+                        extracted_text = event.get("text") or ""
+                        set_notice(event.get("notice", ""))
+                        progress_bar.stop()
+                        progress_bar.configure(mode="determinate", maximum=1, value=1)
+                        progress_text.set("מנוע Office מוכן.")
+                        finished = True
+            except queue.Empty:
+                pass
+            except tk.TclError:
+                return
+            if finished:
+                render_preview(office_state["mode"])
+                return
+            if office_state["loading"]:
+                try:
+                    window.after(100, poll_office_events)
+                except tk.TclError:
+                    return
 
         source_button = ModernButton(
             controls, text="▧  תמונה / מסמך מקורי",
@@ -3896,11 +4132,14 @@ class App:
         text_button.pack(side="right", padx=6)
 
         initial_mode = "source" if (
-            suffix in IMAGE_TYPES or suffix == ".pdf" or suffix in EBOOK_TYPES or preview_path != path
+            is_office or suffix in IMAGE_TYPES or suffix == ".pdf" or suffix in EBOOK_TYPES
         ) else "text"
         render_preview(initial_mode)
-
-
+        if is_office:
+            threading.Thread(
+                target=office_worker, name="LibreOfficePreview", daemon=True
+            ).start()
+            window.after(100, poll_office_events)
 
     def _show_text_in_viewer(self, parent, text: str):
         text_frame = ttk.Frame(parent)

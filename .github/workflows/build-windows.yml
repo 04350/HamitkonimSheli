@@ -140,6 +140,11 @@ jobs:
             $loSource = Join-Path $x86 'LibreOffice'
           }
           if (!(Test-Path (Join-Path $loSource 'program/soffice.exe'))) { throw "LibreOffice folder missing" }
+          $loVersionInfo = (Get-Item (Join-Path $loSource 'program/soffice.exe')).VersionInfo
+          $loVersion = [string]$loVersionInfo.ProductVersion
+          if ([string]::IsNullOrWhiteSpace($loVersion)) { $loVersion = [string]$loVersionInfo.FileVersion }
+          if ([string]::IsNullOrWhiteSpace($loVersion)) { throw "LibreOffice version could not be determined" }
+          Write-Host "Bundling LibreOffice version $loVersion"
 
           $packageRoot = "dist/חבילת-ספריית-המתכונים"
           New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
@@ -155,16 +160,20 @@ jobs:
 
           source = Path(sys.argv[1])
           target = Path(sys.argv[2])
+          bundle_version = sys.argv[3].strip()
+          if not bundle_version:
+              raise SystemExit("LibreOffice version marker is empty")
           count = 0
           with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=4, allowZip64=True) as archive:
               for path in source.rglob("*"):
                   if path.is_file():
                       archive.write(path, path.relative_to(source).as_posix())
                       count += 1
+              archive.writestr(".recipe-library-version", bundle_version)
           if count < 1000:
               raise SystemExit(f"Unexpectedly few Office runtime files: {count}")
-          print(f"Packed {count} LibreOffice files into one archive.")
-          '@ | python - "$loSource" "$loArchive"
+          print(f"Packed {count} LibreOffice files plus a version marker into one archive.")
+          '@ | python - "$loSource" "$loArchive" "$loVersion"
           if (!(Test-Path $loArchive)) { throw "LibreOffice.zip was not created" }
 
           @'
