@@ -96,7 +96,6 @@ class בדיקותספרייה(unittest.TestCase):
                 os.environ["LOCALAPPDATA"] = previous
 
     def test_ניקוי_חיפוש_עברית_וניקוד(self):
-    def test_ניקוי_חיפוש_עברית_וניקוד(self):
         self.assertEqual(app.normalize("עוגת שׁוֹקוֹלָד!"), app.normalize("עוגת שוקולד"))
 
     def test_שם_קובץ_בטוח(self):
