@@ -29,7 +29,7 @@ jobs:
       - name: התקנת ספריות הדרושות לבנייה
         run: |
           python -m pip install --upgrade pip
-          python -m pip install PyMuPDF python-docx striprtf pillow tkinterdnd2 pytesseract openpyxl python-pptx pyinstaller
+          python -m pip install PyMuPDF==1.26.7 python-docx striprtf pillow tkinterdnd2 pytesseract openpyxl python-pptx pyinstaller
           choco install tesseract --no-progress -y
           choco install libreoffice-still --no-progress -y
           $loSource = Join-Path $env:ProgramFiles 'LibreOffice'
@@ -275,7 +275,7 @@ jobs:
       - name: התקנת ספריות להצגת נתוני ההדגמה
         run: |
           python -m pip install --upgrade pip
-          python -m pip install PyMuPDF python-docx striprtf pillow tkinterdnd2 pytesseract openpyxl python-pptx
+          python -m pip install PyMuPDF==1.26.7 python-docx striprtf pillow tkinterdnd2 pytesseract openpyxl python-pptx
 
       - name: הורדת חבילת Windows מההרצה הראשונה
         uses: actions/download-artifact@v4
