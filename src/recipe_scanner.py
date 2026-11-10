@@ -75,7 +75,7 @@ def _crop_page_margins(gray):
     bottom = min(height, bottom + pad_y)
     crop_width, crop_height = right - left, bottom - top
     # Avoid cropping photographs, colored paper, or pages with content near an edge.
-    if crop_width < width * 0.5 or crop_height < height * 0.5:
+    if crop_width < width * 0.30 or crop_height < height * 0.30:
         return gray.copy()
     retained = (crop_width * crop_height) / max(1, width * height)
     if retained > 0.92:
