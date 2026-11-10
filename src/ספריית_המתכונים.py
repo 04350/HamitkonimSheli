@@ -2452,7 +2452,14 @@ class App:
                     tags=("even" if index % 2 == 0 else "odd",)
                 )
 
-        self._render_gallery(ranked)
+        if self.view_mode.get() == "גלריה":
+            self._render_gallery(ranked)
+        else:
+            for child in self.gallery_inner.winfo_children():
+                child.destroy()
+            self.gallery_photos = []
+            self.gallery_cards = {}
+            self._gallery_ranked = ranked
         if hasattr(self, "count_label"):
             self.count_label.configure(text=f"{len(ranked)} מתכונים")
         self.status_value.set(f"נמצאו {len(ranked)} פריטים לפי הסינון הנוכחי.")
@@ -4078,6 +4085,7 @@ class App:
                     })
 
         def poll_office_events():
+            nonlocal extracted_text
             if office_state["closed"].is_set():
                 return
             finished = False
