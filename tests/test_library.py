@@ -166,6 +166,46 @@ class בדיקותספרייה(unittest.TestCase):
         self.assertEqual(app.file_kind(".pdf"), "מסמך")
         self.assertEqual(app.file_kind(".xlsx"), "גיליון")
 
+    def test_מטמון_תמונות_הגלריה_מתעדכן_ונשאר_מוגבל(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            source = folder / "תמונה.png"
+            Image.new("RGB", (40, 30), "red").save(source)
+
+            instance = app.App.__new__(app.App)
+            instance._gallery_image_cache = app.OrderedDict()
+            instance._gallery_image_cache_limit = 2
+
+            with patch.object(app.ImageTk, "PhotoImage", side_effect=lambda *_args, **_kwargs: object()) as factory:
+                first = instance._gallery_photo(str(source))
+                reused = instance._gallery_photo(str(source))
+                self.assertIs(first, reused)
+                self.assertEqual(factory.call_count, 1)
+
+                old_stat = source.stat()
+                Image.new("RGB", (40, 30), "blue").save(source)
+                current_stat = source.stat()
+                os.utime(
+                    source,
+                    ns=(current_stat.st_atime_ns, max(current_stat.st_mtime_ns, old_stat.st_mtime_ns) + 2_000_000_000),
+                )
+                refreshed = instance._gallery_photo(str(source))
+                self.assertIsNot(first, refreshed)
+                self.assertEqual(len(instance._gallery_image_cache), 1)
+
+                second_path = folder / "תמונה-2.png"
+                third_path = folder / "תמונה-3.png"
+                Image.new("RGB", (40, 30), "green").save(second_path)
+                Image.new("RGB", (40, 30), "yellow").save(third_path)
+                second = instance._gallery_photo(str(second_path))
+                self.assertIs(second, instance._gallery_photo(str(second_path)))
+                self.assertIs(refreshed, instance._gallery_photo(str(source)))
+                instance._gallery_photo(str(third_path))
+
+                self.assertLessEqual(len(instance._gallery_image_cache), 2)
+                self.assertEqual(factory.call_count, 4)
+
+
     def test_זיהוי_טקסט_מתמונה_ללא_מטאדאטה(self):
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "סריקה.png"
