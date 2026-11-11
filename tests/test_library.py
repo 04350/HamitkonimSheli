@@ -177,6 +177,7 @@ class בדיקותספרייה(unittest.TestCase):
 
         large_library_limit = instance._set_gallery_image_cache_limit(5000)
         self.assertEqual(large_library_limit, app.GALLERY_CACHE_MAX_IMAGES)
+        self.assertEqual(large_library_limit, 542)  # 96 MiB / (320 × 145 × 4 bytes)
         self.assertGreater(large_library_limit, 64)
         self.assertLessEqual(
             large_library_limit * app.GALLERY_THUMBNAIL_ESTIMATED_BYTES,
