@@ -3,6 +3,7 @@ import sys
 import unittest
 import os
 import tempfile
+import time
 import shutil
 from pathlib import Path
 from unittest.mock import patch
@@ -186,6 +187,97 @@ class בדיקותספרייה(unittest.TestCase):
 
         self.assertEqual(instance._set_gallery_image_cache_limit(2), 2)
         self.assertEqual(len(instance._gallery_image_cache), 2)
+
+
+    def test_ספרייה_גדולה_עם_שלושת_אלפים_פריטים(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        library = None
+        started = time.perf_counter()
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                library = app.RecipeLibrary()
+                records = []
+                for index in range(3000):
+                    recipe_data = app.json.dumps(
+                        {
+                            "category": "בדיקת עומס",
+                            "image_path": f"images/recipe-{index}.jpg",
+                        },
+                        ensure_ascii=False,
+                    )
+                    records.append(
+                        (
+                            f"מתכון בדיקה {index}",
+                            f"recipe-{index}.txt",
+                            str(Path(temp) / f"recipe-{index}.txt"),
+                            ".txt",
+                            "מצרכים: קמח\\nאופן ההכנה: מערבבים",
+                            f"scale-test-digest-{index}",
+                            "11/11/2026 00:00",
+                            recipe_data,
+                        )
+                    )
+
+                library.db.executemany(
+                    """
+                    INSERT INTO items(
+                        title, original_name, stored_path, extension,
+                        content, digest, imported_at, recipe_data
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    records,
+                )
+                tag_names = [f"תגית {index}" for index in range(5)]
+                library.db.executemany(
+                    "INSERT OR IGNORE INTO tags(name) VALUES(?)",
+                    [(name,) for name in tag_names],
+                )
+                tag_ids = {
+                    row["name"]: int(row["id"])
+                    for row in library.db.execute("SELECT id, name FROM tags")
+                }
+                item_ids = [
+                    int(row["id"])
+                    for row in library.db.execute("SELECT id FROM items ORDER BY id")
+                ]
+                library.db.executemany(
+                    "INSERT INTO item_tags(item_id, tag_id) VALUES(?, ?)",
+                    [
+                        (item_id, tag_ids[tag_names[index % len(tag_names)]])
+                        for index, item_id in enumerate(item_ids)
+                    ],
+                )
+                library.db.commit()
+
+                rows = library.rows()
+                self.assertEqual(len(rows), 3000)
+                tags_by_item = library.tags_by_item(row["id"] for row in rows)
+                self.assertEqual(len(tags_by_item), 3000)
+                self.assertTrue(all(len(names) == 1 for names in tags_by_item.values()))
+
+                image_count = sum(
+                    1 for row in rows
+                    if _recipe_image := app._recipe_data_from_row(row).get("image_path")
+                )
+                self.assertEqual(image_count, 3000)
+
+                instance = app.App.__new__(app.App)
+                instance._gallery_image_cache = app.OrderedDict()
+                self.assertEqual(instance._set_gallery_image_cache_limit(image_count), 542)
+
+                elapsed = time.perf_counter() - started
+                print(
+                    f"3,000-item database smoke test passed "
+                    f"(batched tag lookup and image count: {elapsed:.3f}s)."
+                )
+        finally:
+            if library is not None:
+                library.db.close()
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
 
 
     def test_מטמון_תמונות_הגלריה_מתעדכן_ונשאר_מוגבל(self):

@@ -102,11 +102,11 @@ jobs:
         if: github.event_name == 'workflow_dispatch' || steps.latest_check.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.14.0
-          name: ספריית המתכונים שלי – Windows v1.14.0
+          tag_name: v2.0.0
+          name: ספריית המתכונים שלי – Windows v2.0.0
           target_commitish: main
           body: |
-            גרסה 1.14.0 של ספריית המתכונים שלי.
+            גרסה 2.0.0 של ספריית המתכונים שלי.
 
             - גודל מטמון התמונות מותאם למספר הפריטים שיש להם תמונה, עד תקציב משוער של 96MB לנתוני התמונות; אין עוד מגבלה קבועה של 64 תמונות.
             - התמונות נשמרות במטמון LRU, מתרעננות לאחר שינוי בקובץ, ולא נשמרות בקובצי מטמון בדיסק.

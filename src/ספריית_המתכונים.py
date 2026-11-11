@@ -61,7 +61,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.14.0"
+APP_VERSION = "2.0.0"
 def _rounded_points(x1, y1, x2, y2, radius=14, steps=8):
     """Create a polygon outline with smooth rounded corners."""
     width = max(1, x2 - x1)
