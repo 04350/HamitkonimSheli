@@ -252,6 +252,11 @@ EBOOK_TYPES = {".epub", ".mobi", ".fb2"}
 DOCUMENT_TYPES = {".pdf", ".html", ".htm"} | OFFICE_TYPES | EBOOK_TYPES
 MAX_FILE_SIZE = 250 * 1024 * 1024
 MAX_TEXT_LENGTH = 400_000
+GALLERY_THUMBNAIL_WIDTH = 320
+GALLERY_THUMBNAIL_HEIGHT = 145
+GALLERY_CACHE_MEMORY_BUDGET_BYTES = 96 * 1024 * 1024
+GALLERY_THUMBNAIL_ESTIMATED_BYTES = GALLERY_THUMBNAIL_WIDTH * GALLERY_THUMBNAIL_HEIGHT * 4
+GALLERY_CACHE_MAX_IMAGES = max(1, GALLERY_CACHE_MEMORY_BUDGET_BYTES // GALLERY_THUMBNAIL_ESTIMATED_BYTES)
 
 def _portable_libreoffice_archive_version(archive_path: Path) -> str:
     """Read the tiny build marker stored inside the bundled Office ZIP."""
@@ -1399,9 +1404,9 @@ class App:
         self._import_cancel_event = None
         self.selected_item_id = None
         self.gallery_photos = []
-        # Small in-memory LRU: reuses existing Tk images without adding disk cache files.
+        # Dynamic LRU: sized from the library's image count, with a memory budget.
         self._gallery_image_cache = OrderedDict()
-        self._gallery_image_cache_limit = 64
+        self._gallery_image_cache_limit = 0
         self.date_from_value = tk.StringVar()
         self.date_to_value = tk.StringVar()
         self.folder_filter_value = tk.StringVar(value="כל התיקיות")
@@ -2125,6 +2130,20 @@ class App:
                 pass
 
 
+    def _set_gallery_image_cache_limit(self, image_count: int) -> int:
+        """Scale the thumbnail cache to the library, while keeping an estimated RAM budget."""
+        try:
+            available_images = max(0, int(image_count))
+        except (TypeError, ValueError, OverflowError):
+            available_images = 0
+        limit = min(available_images, GALLERY_CACHE_MAX_IMAGES)
+        self._gallery_image_cache_limit = limit
+        cache = getattr(self, "_gallery_image_cache", None)
+        if cache is not None:
+            while len(cache) > limit:
+                cache.popitem(last=False)
+        return limit
+
     def _gallery_photo(self, image_path: str):
         """Return a cached gallery thumbnail, refreshing it when the source file changes."""
         if not image_path or Image is None or ImageTk is None or ImageOps is None:
@@ -2165,7 +2184,7 @@ class App:
                 preview = ImageTk.PhotoImage(source.copy())
 
             cache[cache_key] = preview
-            cache_limit = max(1, int(getattr(self, "_gallery_image_cache_limit", 64)))
+            cache_limit = max(0, int(getattr(self, "_gallery_image_cache_limit", GALLERY_CACHE_MAX_IMAGES)))
             while len(cache) > cache_limit:
                 cache.popitem(last=False)
             return preview
@@ -2393,6 +2412,7 @@ class App:
         )
         recipe_by_id = {}
         ranked = []
+        gallery_image_count = 0
         for row in rows:
             kind = file_kind(row["extension"])
             if type_filter != "כל הסוגים" and kind != type_filter:
@@ -2400,6 +2420,8 @@ class App:
             recipe = _recipe_data_from_row(row)
             item_id = int(row["id"])
             recipe_by_id[item_id] = recipe
+            if str(recipe.get("image_path") or "").strip() or str(row["extension"] or "").lower() in IMAGE_TYPES:
+                gallery_image_count += 1
             category = str(recipe.get("category") or "")
             folder_path = str(recipe.get("source_folder") or "").strip("/")
             if folder_filter != "כל התיקיות" and not (
@@ -2437,6 +2459,8 @@ class App:
                 else:
                     file_size = 0
                 ranked.append((score, row, file_size, imported))
+
+        self._set_gallery_image_cache_limit(gallery_image_count)
 
         if sort_mode == "שם: א-ת":
             ranked.sort(key=lambda x: x[1]["title"].casefold())
