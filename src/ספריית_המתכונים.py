@@ -19,6 +19,7 @@ import subprocess
 import webbrowser
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from html.parser import HTMLParser
@@ -60,7 +61,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "1.13.0"
+APP_VERSION = "1.14.0"
 def _rounded_points(x1, y1, x2, y2, radius=14, steps=8):
     """Create a polygon outline with smooth rounded corners."""
     width = max(1, x2 - x1)
@@ -1398,6 +1399,9 @@ class App:
         self._import_cancel_event = None
         self.selected_item_id = None
         self.gallery_photos = []
+        # Small in-memory LRU: reuses existing Tk images without adding disk cache files.
+        self._gallery_image_cache = OrderedDict()
+        self._gallery_image_cache_limit = 64
         self.date_from_value = tk.StringVar()
         self.date_to_value = tk.StringVar()
         self.folder_filter_value = tk.StringVar(value="כל התיקיות")
@@ -2121,6 +2125,54 @@ class App:
                 pass
 
 
+    def _gallery_photo(self, image_path: str):
+        """Return a cached gallery thumbnail, refreshing it when the source file changes."""
+        if not image_path or Image is None or ImageTk is None or ImageOps is None:
+            return None
+        cache = getattr(self, "_gallery_image_cache", None)
+        if cache is None:
+            cache = OrderedDict()
+            self._gallery_image_cache = cache
+        try:
+            path = Path(image_path)
+            stat = path.stat()
+            normalized_path = os.path.normcase(str(path.resolve()))
+            cache_key = (normalized_path, stat.st_mtime_ns, stat.st_size, 320, 145)
+
+            cached = cache.pop(cache_key, None)
+            if cached is not None:
+                cache[cache_key] = cached
+                return cached
+
+            # A modified source must not leave an older thumbnail behind in the cache.
+            for old_key in tuple(cache):
+                if old_key[0] == normalized_path:
+                    cache.pop(old_key, None)
+
+            with Image.open(path) as opened:
+                source = ImageOps.exif_transpose(opened).convert("RGB")
+                source = ImageOps.fit(source, (320, 145))
+                try:
+                    from PIL import ImageDraw
+                    mask = Image.new("L", source.size, 0)
+                    ImageDraw.Draw(mask).rounded_rectangle(
+                        (0, 0, source.width - 1, source.height - 1),
+                        radius=14, fill=255
+                    )
+                    source.putalpha(mask)
+                except Exception:
+                    pass
+                preview = ImageTk.PhotoImage(source.copy())
+
+            cache[cache_key] = preview
+            cache_limit = max(1, int(getattr(self, "_gallery_image_cache_limit", 64)))
+            while len(cache) > cache_limit:
+                cache.popitem(last=False)
+            return preview
+        except Exception:
+            return None
+
+
     def _render_gallery(self, ranked):
         for child in self.gallery_inner.winfo_children():
             child.destroy()
@@ -2188,26 +2240,9 @@ class App:
             media = tk.Frame(body, bg=self.colors["cover"], height=145)
             media.pack(fill="x", padx=10, pady=(10, 8))
             media.pack_propagate(False)
-            preview = None
-            if image_path and Image is not None and ImageTk is not None:
-                try:
-                    with Image.open(image_path) as source:
-                        source = ImageOps.exif_transpose(source).convert("RGB")
-                        source = ImageOps.fit(source, (320, 145))
-                        try:
-                            from PIL import ImageDraw
-                            mask = Image.new("L", source.size, 0)
-                            ImageDraw.Draw(mask).rounded_rectangle(
-                                (0, 0, source.width - 1, source.height - 1),
-                                radius=14, fill=255
-                            )
-                            source.putalpha(mask)
-                        except Exception:
-                            pass
-                        preview = ImageTk.PhotoImage(source.copy())
-                    self.gallery_photos.append(preview)
-                except Exception:
-                    preview = None
+            preview = self._gallery_photo(image_path) if image_path else None
+            if preview is not None:
+                self.gallery_photos.append(preview)
 
             if preview is not None:
                 image_label = tk.Label(media, image=preview, bg=self.colors["cover"], cursor="hand2")
