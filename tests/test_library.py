@@ -258,7 +258,7 @@ class בדיקותספרייה(unittest.TestCase):
 
                 image_count = sum(
                     1 for row in rows
-                    if _recipe_image := app._recipe_data_from_row(row).get("image_path")
+                    if app._recipe_data_from_row(row).get("image_path")
                 )
                 self.assertEqual(image_count, 3000)
 
