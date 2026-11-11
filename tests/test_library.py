@@ -166,6 +166,27 @@ class בדיקותספרייה(unittest.TestCase):
         self.assertEqual(app.file_kind(".pdf"), "מסמך")
         self.assertEqual(app.file_kind(".xlsx"), "גיליון")
 
+    def test_גודל_מטמון_הגלריה_מותאם_לספרייה_ומוגבל_בזיכרון(self):
+        instance = app.App.__new__(app.App)
+        instance._gallery_image_cache = app.OrderedDict(
+            (index, object()) for index in range(10)
+        )
+
+        self.assertEqual(instance._set_gallery_image_cache_limit(7), 7)
+        self.assertEqual(len(instance._gallery_image_cache), 7)
+
+        large_library_limit = instance._set_gallery_image_cache_limit(5000)
+        self.assertEqual(large_library_limit, app.GALLERY_CACHE_MAX_IMAGES)
+        self.assertGreater(large_library_limit, 64)
+        self.assertLessEqual(
+            large_library_limit * app.GALLERY_THUMBNAIL_ESTIMATED_BYTES,
+            app.GALLERY_CACHE_MEMORY_BUDGET_BYTES,
+        )
+
+        self.assertEqual(instance._set_gallery_image_cache_limit(2), 2)
+        self.assertEqual(len(instance._gallery_image_cache), 2)
+
+
     def test_מטמון_תמונות_הגלריה_מתעדכן_ונשאר_מוגבל(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
