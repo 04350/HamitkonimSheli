@@ -203,6 +203,12 @@ class בדיקותספרייה(unittest.TestCase):
                 instance._gallery_photo(str(third_path))
 
                 self.assertLessEqual(len(instance._gallery_image_cache), 2)
+                second_normalized = os.path.normcase(str(second_path.resolve()))
+                self.assertNotIn(
+                    second_normalized,
+                    {key[0] for key in instance._gallery_image_cache},
+                    "Least-recently-used thumbnails should be evicted first",
+                )
                 self.assertEqual(factory.call_count, 4)
 
 
