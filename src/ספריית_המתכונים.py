@@ -242,6 +242,54 @@ class RoundedPanel(tk.Canvas):
         self.outline_color = color
         self._draw()
 
+class VerticalScrollFrame(tk.Frame):
+    """A reusable frame whose content stays reachable at any window size."""
+    def __init__(self, parent, *, background="#FFFFFF", min_content_height=0):
+        super().__init__(parent, bg=background, bd=0, highlightthickness=0)
+        self.min_content_height = max(0, int(min_content_height))
+        self.canvas = tk.Canvas(
+            self, bg=background, highlightthickness=0, bd=0,
+            borderwidth=0, takefocus=0,
+        )
+        self.scrollbar = ttk.Scrollbar(
+            self, orient="vertical", command=self.canvas.yview,
+        )
+        self.content = tk.Frame(
+            self.canvas, bg=background, bd=0, highlightthickness=0,
+        )
+        self.window_id = self.canvas.create_window(
+            (0, 0), window=self.content, anchor="nw",
+        )
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.scrollbar.pack(side="left", fill="y")
+        self.canvas.pack(side="right", fill="both", expand=True)
+        self.content.bind("<Configure>", self._sync_scrollregion)
+        self.canvas.bind("<Configure>", self._resize_content)
+        self.after_idle(self._sync_scrollregion)
+
+    def _resize_content(self, event=None):
+        try:
+            width = event.width if event is not None else self.canvas.winfo_width()
+            self.canvas.itemconfigure(self.window_id, width=max(1, width))
+            self._sync_scrollregion()
+        except tk.TclError:
+            pass
+
+    def _sync_scrollregion(self, _event=None):
+        try:
+            requested_height = self.content.winfo_reqheight()
+            viewport_height = self.canvas.winfo_height()
+            content_height = max(
+                self.min_content_height, requested_height, viewport_height, 1
+            )
+            self.canvas.itemconfigure(self.window_id, height=content_height)
+            self.canvas.configure(
+                scrollregion=(0, 0, max(1, self.canvas.winfo_width()), content_height)
+            )
+        except tk.TclError:
+            pass
+
+
 IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}
 TEXT_TYPES = {".txt", ".md", ".csv", ".tsv", ".log"}
 WORD_TYPES = {".doc", ".docx", ".docm", ".odt", ".rtf"}
@@ -1573,7 +1621,7 @@ class App:
 
 
     def _push_embedded_page(self, title=""):
-        """Show a full-size screen inside the existing application window."""
+        """Show a scrollable full-size screen inside the existing application window."""
         if not hasattr(self, "_embedded_pages"):
             self._embedded_pages = []
         if self._embedded_pages:
@@ -1582,11 +1630,18 @@ class App:
             except tk.TclError:
                 pass
         host = getattr(self, "workspace", self.shell)
-        page = tk.Frame(host, bg=self.colors["background"], bd=0, highlightthickness=0)
-        page.place(relx=0, rely=0, relwidth=1, relheight=1)
-        page.lift()
+        page_host = tk.Frame(host, bg=self.colors["background"], bd=0, highlightthickness=0)
+        page_host.place(relx=0, rely=0, relwidth=1, relheight=1)
+        page_host.lift()
+        page_scroll_frame = VerticalScrollFrame(
+            page_host, background=self.colors["background"]
+        )
+        page_scroll_frame.pack(fill="both", expand=True)
+        page = page_scroll_frame.content
         page.page_title = title
-        self._embedded_pages.append(page)
+        page._scroll_host = page_host
+        page._scroll_frame = page_scroll_frame
+        self._embedded_pages.append(page_host)
         return page
 
     def _pop_embedded_page(self, page=None):
@@ -1595,13 +1650,16 @@ class App:
         if not stack:
             return
         current = stack[-1]
-        if page is not None and current is not page:
+        requested_host = (
+            getattr(page, "_scroll_host", page) if page is not None else current
+        )
+        if requested_host is not current:
             try:
-                page.destroy()
+                requested_host.destroy()
             except tk.TclError:
                 pass
             try:
-                stack.remove(page)
+                stack.remove(requested_host)
             except ValueError:
                 pass
             return
@@ -1715,17 +1773,23 @@ class App:
         ).pack(fill="x")
         tk.Frame(sidebar, bg="#3C5748", height=1).pack(fill="x", padx=20, pady=(3, 18))
 
+        self.sidebar_scroll_frame = VerticalScrollFrame(
+            sidebar, background=c["sidebar"]
+        )
+        self.sidebar_scroll_frame.pack(fill="both", expand=True)
+        nav_area = self.sidebar_scroll_frame.content
+
         self.nav_buttons = {}
-        tk.Label(sidebar, text="הספרייה", bg=c["sidebar"], fg="#91A99A",
+        tk.Label(nav_area, text="הספרייה", bg=c["sidebar"], fg="#91A99A",
                  font=("Segoe UI", 9, "bold"), anchor="e", padx=22).pack(fill="x", pady=(0, 7))
         for key, glyph, label in [
             ("recipes", "▦", "המתכונים שלי"),
             ("favorites", "★", "מועדפים"),
             ("files", "▤", "כל הקבצים"),
         ]:
-            self._add_nav_button(sidebar, key, glyph, label)
+            self._add_nav_button(nav_area, key, glyph, label)
 
-        tk.Label(sidebar, text="כלים", bg=c["sidebar"], fg="#91A99A",
+        tk.Label(nav_area, text="כלים", bg=c["sidebar"], fg="#91A99A",
                  font=("Segoe UI", 9, "bold"), anchor="e", padx=22).pack(fill="x", pady=(25, 7))
         for key, glyph, label in [
             ("scanner", "⌕", "סריקה חכמה"),
@@ -1733,14 +1797,14 @@ class App:
             ("import", "＋", "הוספת קבצים"),
             ("folder", "▣", "ייבוא תיקייה"),
         ]:
-            self._add_nav_button(sidebar, key, glyph, label)
-        tk.Frame(sidebar, bg="#3C5748", height=1).pack(fill="x", padx=20, pady=(18, 10))
+            self._add_nav_button(nav_area, key, glyph, label)
+        tk.Frame(nav_area, bg="#3C5748", height=1).pack(fill="x", padx=20, pady=(18, 10))
         for key, glyph, label in [
             ("backup", "↥", "גיבוי ושחזור"),
             ("recycle", "♻", "סל המחזור"),
             ("settings", "⚙", "הגדרות ועיצוב"),
         ]:
-            self._add_nav_button(sidebar, key, glyph, label)
+            self._add_nav_button(nav_area, key, glyph, label)
 
         footer = tk.Frame(sidebar, bg=c["sidebar"], padx=20, pady=18)
         footer.pack(side="bottom", fill="x")
@@ -1753,8 +1817,17 @@ class App:
             fg="#81998A", font=("Segoe UI", 8), anchor="e"
         ).pack(fill="x", pady=(4, 0))
 
-        workspace = tk.Frame(self.shell, bg=c["background"], padx=26, pady=23)
-        workspace.pack(side="left", fill="both", expand=True)
+        workspace_scroll_host = tk.Frame(self.shell, bg=c["background"], bd=0)
+        workspace_scroll_host.pack(side="left", fill="both", expand=True)
+        self.workspace_scroll_frame = VerticalScrollFrame(
+            workspace_scroll_host, background=c["background"], min_content_height=720
+        )
+        self.workspace_scroll_frame.pack(fill="both", expand=True)
+        workspace = tk.Frame(
+            self.workspace_scroll_frame.content, bg=c["background"],
+            padx=26, pady=23,
+        )
+        workspace.pack(fill="both", expand=True)
         self.workspace = workspace
         header = tk.Frame(workspace, bg=c["background"])
         header.pack(fill="x", pady=(0, 17))
@@ -1971,7 +2044,6 @@ class App:
         self.gallery_window = self.gallery_canvas.create_window((0, 0), window=self.gallery_inner, anchor="nw")
         self.gallery_inner.bind("<Configure>", lambda _event: self.gallery_canvas.configure(scrollregion=self.gallery_canvas.bbox("all")))
         self.gallery_canvas.bind("<Configure>", lambda event: self.gallery_canvas.itemconfigure(self.gallery_window, width=event.width))
-        self.gallery_canvas.bind("<MouseWheel>", lambda event: self.gallery_canvas.yview_scroll(int(-event.delta / 120), "units"))
         self.gallery_container.pack(fill="both", expand=True)
 
         # Compatibility controls used by legacy filters and preview commands.
@@ -2106,7 +2178,6 @@ class App:
     def _bind_gallery_click(self, widget, item_id):
         widget.bind("<Button-1>", lambda _event, value=item_id: self._select_gallery_item(value))
         widget.bind("<Double-Button-1>", lambda _event, value=item_id: (self._select_gallery_item(value), self.open_selected()))
-        widget.bind("<MouseWheel>", lambda event: self.gallery_canvas.yview_scroll(int(-event.delta / 120), "units"))
         for child in widget.winfo_children():
             self._bind_gallery_click(child, item_id)
 
@@ -2977,7 +3048,47 @@ class App:
             tags=("preview-image",)
         )
 
+    def _route_mousewheel(self, event):
+        """Scroll the deepest scrollable widget under the pointer, bubbling at its edges."""
+        number = getattr(event, "num", None)
+        if number == 4:
+            units = -3
+        elif number == 5:
+            units = 3
+        else:
+            delta = getattr(event, "delta", 0) or 0
+            if not delta:
+                return None
+            if abs(delta) >= 120:
+                units = int(-delta / 120)
+            else:
+                units = -1 if delta > 0 else 1
+        if not units:
+            return None
+
+        widget = getattr(event, "widget", None)
+        while widget is not None:
+            yview = getattr(widget, "yview", None)
+            scroll = getattr(widget, "yview_scroll", None)
+            if callable(yview) and callable(scroll):
+                try:
+                    before = tuple(yview())
+                    scroll(units, "units")
+                    after = tuple(yview())
+                    if before != after:
+                        return "break"
+                except (tk.TclError, TypeError, ValueError):
+                    pass
+            widget = getattr(widget, "master", None)
+        return None
+
+    def _bind_global_scrolling(self):
+        """Enable consistent wheel scrolling on Windows, macOS and Linux."""
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.root.bind_all(sequence, self._route_mousewheel, add="+")
+
     def _bind_shortcuts(self):
+        self._bind_global_scrolling()
         self.root.bind_all("<Control-f>", self._focus_search)
         self.root.bind_all("<Control-F>", self._focus_search)
         self.root.bind_all("<Control-o>", lambda _event: self.open_selected())
