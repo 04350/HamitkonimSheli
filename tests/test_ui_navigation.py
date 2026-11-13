@@ -25,6 +25,23 @@ class InAppNavigationTests(unittest.TestCase):
         self.assertIn("reader_pane_width", source)
         self.assertIn("source.thumbnail((304, 430)", source)
 
+    def test_global_scrolling_covers_sidebar_workspace_and_embedded_pages(self):
+        source = (ROOT / "src" / "ספריית_המתכונים.py").read_text(encoding="utf-8")
+        for expected in (
+            "class VerticalScrollFrame(tk.Frame):",
+            "self.sidebar_scroll_frame = VerticalScrollFrame(",
+            "self.workspace_scroll_frame = VerticalScrollFrame(",
+            "page_scroll_frame = VerticalScrollFrame(",
+            'for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):',
+            'self.root.bind_all(sequence, self._route_mousewheel, add="+")',
+            "def _route_mousewheel(self, event):",
+            'widget = getattr(widget, "master", None)',
+        ):
+            self.assertIn(expected, source)
+
+        self.assertNotIn('self.gallery_canvas.bind("<MouseWheel>"', source)
+        self.assertIn('APP_VERSION = "2.0.0"', source)
+
     def test_screenshot_is_process_specific_and_checks_demo_data(self):
         capture = (ROOT / "scripts" / "capture_app_screenshot.py").read_text(encoding="utf-8")
         workflow = (ROOT / ".github" / "workflows" / "build-windows.yml").read_text(encoding="utf-8")
