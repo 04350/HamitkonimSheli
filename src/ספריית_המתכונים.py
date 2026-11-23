@@ -497,8 +497,13 @@ def convert_office_to_pdf(
         return None, None, f"לא ניתן להציג את מסמך Office: {exc}"
 
 
+OCR_TESSDATA_DIR: Path | None = None
+
+
 def configure_ocr():
     """Locate the bundled offline Tesseract engine and Hebrew language data."""
+    global OCR_TESSDATA_DIR
+    OCR_TESSDATA_DIR = None
     if pytesseract is None:
         return False
     module_dir = Path(__file__).resolve().parent
@@ -513,8 +518,10 @@ def configure_ocr():
             pytesseract.pytesseract.tesseract_cmd = str(candidate)
             tessdata = candidate.parent / "tessdata"
             if tessdata.exists():
-                # Tesseract 5 expects TESSDATA_PREFIX to be the directory
-                # containing the tessdata folder, not tessdata itself.
+                # Keep the parent directory for compatibility with Tesseract's
+                # environment convention, and also pass it explicitly to each
+                # OCR invocation to avoid platform-specific lookup differences.
+                OCR_TESSDATA_DIR = candidate.parent
                 os.environ["TESSDATA_PREFIX"] = str(candidate.parent)
             return True
     return False
@@ -542,7 +549,11 @@ def ocr_image(image) -> str:
     _LAST_OCR_TITLE = ""
     if pytesseract is None:
         return ""
-    result = recognize_image(image, pytesseract, alternate_languages=_ocr_alternate_languages())
+    result = recognize_image(
+        image, pytesseract,
+        alternate_languages=_ocr_alternate_languages(),
+        tessdata_dir=str(OCR_TESSDATA_DIR) if OCR_TESSDATA_DIR else None,
+    )
     _LAST_OCR_TITLE = str(result.get("title") or "")
     return str(result.get("text") or "")
 

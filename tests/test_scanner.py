@@ -86,6 +86,28 @@ class RecipeScannerTests(unittest.TestCase):
         self.assertIn("APPLE", result["text"])
         self.assertEqual(fake.image_to_data.call_count, 1)
 
+    def test_explicit_tessdata_directory_is_passed_to_tesseract(self):
+        class FakeOutput:
+            DICT = "dict"
+        fake = Mock()
+        fake.Output = FakeOutput
+        fake.image_to_data.return_value = {
+            "text": ["APPLE", "RECIPE"], "conf": ["96", "94"],
+            "left": ["10", "140"], "top": ["20", "20"],
+            "width": ["110", "120"], "height": ["42", "42"],
+            "block_num": ["1", "1"], "par_num": ["1", "1"], "line_num": ["1", "1"],
+        }
+        image = Image.new("RGB", (900, 400), "white")
+        tessdata_parent = r"C:\Program Files\Recipe App\tesseract"
+        try:
+            result = recognize_image(image, fake, tessdata_dir=tessdata_parent)
+        finally:
+            image.close()
+        self.assertIn("APPLE", result["text"])
+        config = fake.image_to_data.call_args.kwargs["config"]
+        self.assertIn('--tessdata-dir "C:/Program Files/Recipe App/tesseract"', config)
+        self.assertIn("--psm 6", config)
+
     def test_low_confidence_first_pass_runs_one_retry(self):
         class FakeOutput:
             DICT = "dict"

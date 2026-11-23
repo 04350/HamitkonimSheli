@@ -1,0 +1,9 @@
+# Private OCR datasets and local training results; do not commit recipe scans.
+data/recipe-ocr-training/*
+!data/recipe-ocr-training/.gitkeep
+data/recipe-ocr-evaluation/*
+!data/recipe-ocr-evaluation/.gitkeep
+build/recipe-ocr-training/
+ocr-evaluation-results/
+__pycache__/
+*.py[cod]
