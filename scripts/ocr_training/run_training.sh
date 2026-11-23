@@ -3,11 +3,11 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-TRAIN_DIR="\${TRAIN_DIR:-$ROOT/data/recipe-ocr-training}"
-EVAL_DIR="\${EVAL_DIR:-$ROOT/data/recipe-ocr-evaluation}"
-WORK="\${WORK_DIR:-$ROOT/build/recipe-ocr-training}"
-ITERATIONS="\${MAX_ITERATIONS:-10000}"
-REF="\${TESSTRAIN_REF:-main}"
+TRAIN_DIR="${TRAIN_DIR:-$ROOT/data/recipe-ocr-training}"
+EVAL_DIR="${EVAL_DIR:-$ROOT/data/recipe-ocr-evaluation}"
+WORK="${WORK_DIR:-$ROOT/build/recipe-ocr-training}"
+ITERATIONS="${MAX_ITERATIONS:-10000}"
+REF="${TESSTRAIN_REF:-main}"
 TESSDATA="$WORK/tessdata"
 TESSTRAIN="$WORK/tesstrain"
 for cmd in python3 make git curl sha256sum tesseract lstmtraining combine_tessdata wget; do
