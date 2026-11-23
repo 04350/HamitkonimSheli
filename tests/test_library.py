@@ -800,6 +800,90 @@ class בדיקותספרייה(unittest.TestCase):
                 os.environ["LOCALAPPDATA"] = previous
 
 
+
+    def test_שחזור_גיבוי_ישן_ללא_manifest_שומר_תיקיות_מקוננות(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                profile_a = Path(temp) / "profile-a"
+                profile_b = Path(temp) / "profile-b"
+                os.environ["LOCALAPPDATA"] = str(profile_a)
+                source = Path(temp) / "recipe.txt"
+                source.write_text("מתכון ישן", encoding="utf-8")
+                original = app.RecipeLibrary()
+                self.assertTrue(original.import_one(source, relative_folder="מתכונים/שבת")[0])
+                stored = Path(original.rows()[0]["stored_path"])
+                old_style_path = (
+                    r"C:\Users\old-user\AppData\Local\ספריית המתכונים שלי\הקבצים שלי\מתכונים\שבת\"
+                    + stored.name
+                )
+                db_copy = Path(temp) / "old-library.sqlite3"
+                backup_db = app.sqlite3.connect(db_copy)
+                original.db.backup(backup_db)
+                backup_db.execute("UPDATE items SET stored_path=?", (old_style_path,))
+                backup_db.commit()
+                backup_db.close()
+
+                legacy = Path(temp) / "legacy.zip"
+                with app.zipfile.ZipFile(legacy, "w", app.zipfile.ZIP_DEFLATED) as archive:
+                    archive.write(db_copy, "הספרייה.sqlite3")
+                    archive.writestr("הקבצים שלי/מתכונים/", b"")
+                    for path in original.files_dir.rglob("*"):
+                        if path.is_file():
+                            archive.write(path, "הקבצים שלי/" + path.relative_to(original.files_dir).as_posix())
+                original.db.close()
+
+                os.environ["LOCALAPPDATA"] = str(profile_b)
+                restored_library = app.RecipeLibrary()
+                self.assertEqual(restored_library.restore_backup(legacy), 1)
+                restored_path = Path(restored_library.rows()[0]["stored_path"])
+                self.assertEqual(
+                    restored_path,
+                    profile_b / app.APP_NAME / "הקבצים שלי" / "מתכונים" / "שבת" / stored.name
+                )
+                self.assertEqual(restored_path.read_text(encoding="utf-8"), "מתכון ישן")
+                restored_library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_שחזור_מזהה_שינוי_בתוכן_קובץ_לפי_hash_ומשאיר_את_הספרייה(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "recipe.txt"
+                source.write_text("תוכן מקורי", encoding="utf-8")
+                library = app.RecipeLibrary()
+                self.assertTrue(library.import_one(source)[0])
+                backup = Path(temp) / "backup.zip"
+                library.create_backup(backup)
+                current_row = library.rows()[0]
+                current_file = Path(current_row["stored_path"])
+                original_data = current_file.read_bytes()
+
+                tampered = Path(temp) / "tampered.zip"
+                with app.zipfile.ZipFile(backup, "r") as original_archive:
+                    with app.zipfile.ZipFile(tampered, "w", app.zipfile.ZIP_DEFLATED) as altered_archive:
+                        for info in original_archive.infolist():
+                            payload = original_archive.read(info.filename)
+                            if info.filename.startswith("הקבצים שלי/"):
+                                payload = b"tampered-content"
+                            altered_archive.writestr(info, payload)
+
+                with self.assertRaises(ValueError):
+                    library.restore_backup(tampered)
+                self.assertEqual(len(library.rows()), 1)
+                self.assertEqual(current_file.read_bytes(), original_data)
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
     def test_גרסת_schema_מתועדת_במסד_הנתונים(self):
         previous = os.environ.get("LOCALAPPDATA")
         try:

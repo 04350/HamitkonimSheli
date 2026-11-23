@@ -1351,9 +1351,18 @@ class RecipeLibrary:
                         raise ValueError("הגיבוי מכיל קובץ עם יחס דחיסה חריג.")
 
                     if info.is_dir():
-                        if clean_name != "הקבצים שלי":
-                            raise ValueError("הגיבוי מכיל תיקייה לא מוכרת.")
-                        continue
+                        if clean_name == "הקבצים שלי":
+                            continue
+                        if normalized.startswith("הקבצים שלי/"):
+                            relative_dir = _validated_backup_relative_path(
+                                clean_name[len("הקבצים שלי/"):]
+                            )
+                            directory = extracted_files.joinpath(*relative_dir.split("/"))
+                            if not directory.resolve().is_relative_to(extracted_files.resolve()):
+                                raise ValueError("הגיבוי מכיל נתיב תיקייה מחוץ לתיקיית הספרייה.")
+                            directory.mkdir(parents=True, exist_ok=True)
+                            continue
+                        raise ValueError("הגיבוי מכיל תיקייה לא מוכרת.")
                     if clean_name == "הספרייה.sqlite3":
                         database_info = info
                     elif clean_name == "manifest.json":

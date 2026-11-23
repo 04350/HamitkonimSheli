@@ -47,8 +47,8 @@ class InAppNavigationTests(unittest.TestCase):
 
     def test_premium_theme_has_a_distinct_warm_forest_and_champagne_palette(self):
         source = (ROOT / "src" / "ספריית_המתכונים.py").read_text(encoding="utf-8")
-        self.assertIn('\"accent\": \"#B58B59\"', source)
-        self.assertIn('\"sidebar\": \"#142E25\"', source)
+        self.assertIn('"accent": "#B58B59"', source)
+        self.assertIn('"sidebar": "#142E25"', source)
         self.assertIn('self.library.get_setting("color_theme", "יוקרה")', source)
         self.assertIn('font=("Segoe UI", 30, "bold")', source)
 
