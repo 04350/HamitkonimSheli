@@ -89,7 +89,9 @@ jobs:
                   raise SystemExit(f"Missing bundled OCR model attribution: {notice}")
           if not app.configure_ocr():
               raise SystemExit("Tesseract was not found by the application")
-          languages = set(app.pytesseract.get_languages())
+          tessdata_dir = (root / "tessdata").resolve()
+          tessdata_config = f'--tessdata-dir "{tessdata_dir.as_posix()}"'
+          languages = set(app.pytesseract.get_languages(config=tessdata_config))
           if not {"eng", "heb", "heb4"}.issubset(languages):
               raise SystemExit(f"Missing OCR languages from bundled tessdata: {languages}")
           print(f"Tesseract bundled languages: {sorted(languages)}")
@@ -112,7 +114,8 @@ jobs:
               hebrew_draw.text((30, 35), hebrew_text[::-1], fill="black", font=font)
           recognized_hebrew = app.ocr_image(hebrew_image)
           recognized_heb4 = app.pytesseract.image_to_string(
-              hebrew_image, lang="heb4+eng", config="--oem 3 --psm 6", timeout=35
+              hebrew_image, lang="heb4+eng",
+              config=f'{tessdata_config} --oem 3 --psm 6', timeout=35
           )
           hebrew_image.close()
           hebrew_count = sum(1 for char in recognized_hebrew if "א" <= char <= "ת")
