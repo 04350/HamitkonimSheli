@@ -10,11 +10,13 @@
 
 ```bash
 sudo apt update
-sudo apt install -y git make wget curl python3 python3-pip tesseract-ocr
-python3 -m pip install --user pillow pymupdf
+sudo apt install -y git make wget curl python3 python3-venv tesseract-ocr
+python3 -m venv .venv-ocr
+source .venv-ocr/bin/activate
+python -m pip install --upgrade pip pillow pymupdf
 ```
 
-בדוק שהפקודות `tesseract`, `lstmtraining`, `combine_tessdata`, `make` ו־`wget` זמינות.
+אחרי פתיחת סביבת העבודה בכל טרמינל חדש, הפעל קודם: `source .venv-ocr/bin/activate`. בדוק שהפקודות `tesseract`, `lstmtraining`, `combine_tessdata`, `make` ו־`wget` זמינות.
 
 ## 2. סימון שורות
 
