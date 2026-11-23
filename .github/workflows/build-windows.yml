@@ -62,6 +62,7 @@ jobs:
         run: |
           @'
           import sys
+          import subprocess
           from pathlib import Path
           from PIL import Image, ImageDraw, ImageFont
 
@@ -92,9 +93,12 @@ jobs:
           tessdata_config = f'--tessdata-dir "{root.as_posix()}"'
           languages = set(app.pytesseract.get_languages(config=tessdata_config))
           if not {"eng", "heb", "heb4"}.issubset(languages):
-              listed = app.pytesseract.run_tesseract(
-                  [], "list-langs", lang=None, config=tessdata_config
+              listed_result = subprocess.run(
+                  [app.pytesseract.pytesseract.tesseract_cmd,
+                   "--list-langs", "--tessdata-dir", root.as_posix()],
+                  capture_output=True, text=True, timeout=20
               )
+              listed = listed_result.stdout + listed_result.stderr
               raise SystemExit(
                   f"Missing OCR languages from bundled tessdata: {languages}. "
                   f"Tesseract --list-langs output: {listed}"
