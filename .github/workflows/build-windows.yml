@@ -9,6 +9,8 @@ on:
       - 'tests/**'
       - 'assets/**'
       - 'scripts/**'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
