@@ -105,7 +105,7 @@ class RecipeScannerTests(unittest.TestCase):
             image.close()
         self.assertIn("APPLE", result["text"])
         config = fake.image_to_data.call_args.kwargs["config"]
-        self.assertIn(r'--tessdata-dir "C:\Program Files\Recipe App\tesseract"', config)
+        self.assertIn('--tessdata-dir "C:/Program Files/Recipe App/tesseract"', config)
         self.assertIn("--psm 6", config)
 
     def test_low_confidence_first_pass_runs_one_retry(self):
