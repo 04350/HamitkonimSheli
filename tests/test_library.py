@@ -696,6 +696,32 @@ class בדיקותספרייה(unittest.TestCase):
             else:
                 os.environ["LOCALAPPDATA"] = previous
 
+
+    def test_גיבוי_עם_קובץ_חסר_נכשל_בלי_להחליף_גיבוי_קיים(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "missing-recipe.txt"
+                source.write_text("תוכן מתכון", encoding="utf-8")
+                library = app.RecipeLibrary()
+                self.assertTrue(library.import_one(source)[0])
+                stored_file = Path(library.rows()[0]["stored_path"])
+                stored_file.unlink()
+
+                backup = Path(temp) / "backup.zip"
+                existing_backup = b"previous-valid-backup-must-survive"
+                backup.write_bytes(existing_backup)
+                with self.assertRaises(ValueError):
+                    library.create_backup(backup)
+                self.assertEqual(backup.read_bytes(), existing_backup)
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
     def test_גיבוי_מכיל_manifest_ואימות_קבצים(self):
         previous = os.environ.get("LOCALAPPDATA")
         try:

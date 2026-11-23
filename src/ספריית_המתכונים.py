@@ -1241,8 +1241,11 @@ class RecipeLibrary:
             item_manifest = []
             for row in self.db.execute("SELECT id, stored_path FROM items ORDER BY id").fetchall():
                 relative = _backup_relative_path(row["stored_path"], self.files_dir)
-                if relative and relative.casefold() not in included_paths:
-                    relative = None
+                if not relative or relative.casefold() not in included_paths:
+                    raise ValueError(
+                        f"הפריט {row['id']} מפנה לקובץ חסר או מחוץ לתיקיית הספרייה. "
+                        "הגיבוי בוטל כדי לא ליצור גיבוי חלקי."
+                    )
                 item_manifest.append({"id": int(row["id"]), "path": relative})
 
             manifest = {
@@ -1280,6 +1283,25 @@ class RecipeLibrary:
                     damaged_entry = archive.testzip()
                     if damaged_entry is not None:
                         raise ValueError(f"קובץ הגיבוי לא עבר בדיקת תקינות: {damaged_entry}")
+
+                    def verify_archived_entry(name, expected_size, expected_hash):
+                        digest = hashlib.sha256()
+                        actual_size = 0
+                        with archive.open(name, "r") as archived_file:
+                            for chunk in iter(lambda: archived_file.read(1024 * 1024), b""):
+                                actual_size += len(chunk)
+                                digest.update(chunk)
+                        if actual_size != expected_size or digest.hexdigest() != expected_hash:
+                            raise ValueError(f"הקובץ השתנה או נפגם בזמן יצירת הגיבוי: {name}")
+
+                    verify_archived_entry(
+                        "הספרייה.sqlite3", manifest["database"]["size"],
+                        manifest["database"]["sha256"]
+                    )
+                    for entry in file_manifest:
+                        verify_archived_entry(
+                            "הקבצים שלי/" + entry["path"], entry["size"], entry["sha256"]
+                        )
 
                 os.replace(temporary_archive, target)
             except Exception:
