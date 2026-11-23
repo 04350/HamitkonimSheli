@@ -14,7 +14,7 @@ def distance(a,b):
     return row[-1]
 def norm(s):return re.sub(r"\s+"," ",s.replace("\ufeff","").strip())
 def run_ocr(exe,image,tessdata,language,psm):
-    cmd=[exe,str(image),"stdout","--tessdata-dir",str(tessdata),"-l",language,"--oem","1","--psm",str(psm)]
+    cmd=[exe,str(image),"stdout","--tessdata-dir",str(tessdata.parent),"-l",language,"--oem","1","--psm",str(psm)]
     done=subprocess.run(cmd,capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=60,check=False)
     if done.returncode:raise RuntimeError(f"{language} failed on {image.name}: {done.stderr.strip()}")
     return done.stdout
