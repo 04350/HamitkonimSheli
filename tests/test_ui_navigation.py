@@ -51,6 +51,9 @@ class InAppNavigationTests(unittest.TestCase):
         self.assertIn('"sidebar": "#142E25"', source)
         self.assertIn('self.library.get_setting("color_theme", "יוקרה")', source)
         self.assertIn('font=("Segoe UI", 30, "bold")', source)
+        self.assertIn('surface=c["hero"]', source)
+        self.assertIn('bg=c["hero"], fg="#FFFDF8"', source)
+        self.assertIn('bg=c["accent"], width=4', source)
 
     def test_screenshot_is_process_specific_and_checks_demo_data(self):
         capture = (ROOT / "scripts" / "capture_app_screenshot.py").read_text(encoding="utf-8")

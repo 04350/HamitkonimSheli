@@ -2165,29 +2165,38 @@ class App:
         )
         workspace.pack(fill="both", expand=True)
         self.workspace = workspace
-        header = tk.Frame(workspace, bg=c["background"])
-        header.pack(fill="x", pady=(0, 20))
-        heading = tk.Frame(header, bg=c["background"])
+        hero_shell = RoundedPanel(
+            workspace, surface=c["hero"], background=c["background"],
+            outline=c["hero"], shadow=c["shadow"], radius=23,
+            padding=0, height=112, show_shadow=True
+        )
+        hero_shell.pack(fill="x", pady=(0, 22))
+        header = tk.Frame(hero_shell.content, bg=c["hero"], padx=25, pady=19)
+        header.pack(fill="both", expand=True)
+        heading = tk.Frame(header, bg=c["hero"])
         heading.pack(side="right", fill="x", expand=True)
+        tk.Frame(header, bg=c["accent"], width=4).pack(
+            side="right", fill="y", padx=(0, 15)
+        )
         self.page_title_label = tk.Label(
-            heading, text="המתכונים שלי", bg=c["background"], fg=c["navy"],
+            heading, text="המתכונים שלי", bg=c["hero"], fg="#FFFDF8",
             font=("Segoe UI", 30, "bold"), anchor="e"
         )
         self.page_title_label.pack(fill="x")
         self.page_subtitle_label = tk.Label(
             heading, text="אוסף הטעמים שלך — מסודר, זמין ומוכן לקריאה.",
-            bg=c["background"], fg=c["muted"], font=("Segoe UI", 10), anchor="e"
+            bg=c["hero"], fg="#D5DED5", font=("Segoe UI", 10), anchor="e"
         )
         self.page_subtitle_label.pack(fill="x", pady=(5, 0))
         self.count_badge = ModernButton(
             header, text="הספרייה שלך", command=None, width=150, height=38,
             bg=c["pill"], fg=c["pill_text"], hover_bg=c["pill"],
             active_bg=c["pill"], radius=18, font=("Segoe UI", 9, "bold"),
-            canvas_bg=c["background"], disabled=True
+            canvas_bg=c["hero"], disabled=True
         )
         self.count_badge.pack(side="left", padx=(0, 5))
         self.count_label = tk.Label(
-            header, text="", bg=c["background"], fg=c["muted"],
+            header, text="", bg=c["hero"], fg="#D5DED5",
             font=("Segoe UI", 9, "bold"), anchor="e"
         )
         self.count_label.pack(side="left", padx=(10, 0))
@@ -2195,7 +2204,7 @@ class App:
             header, text="＋  הוספת מתכון", command=self.add_files,
             width=148, height=42, bg=c["accent"], fg="#FFFFFF",
             hover_bg=c["accent_hover"], active_bg=c["accent_hover"],
-            radius=14, font=("Segoe UI", 9, "bold"), canvas_bg=c["background"]
+            radius=14, font=("Segoe UI", 9, "bold"), canvas_bg=c["hero"]
         ).pack(side="left", padx=(0, 12))
 
         search_shell = RoundedPanel(
