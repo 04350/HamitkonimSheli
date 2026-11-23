@@ -1336,6 +1336,10 @@ class RecipeLibrary:
                         raise ValueError("הגיבוי מכיל קובץ ZIP מוצפן שאינו נתמך.")
                     if info.file_size > max_entry_size:
                         raise ValueError("אחד הקבצים בגיבוי גדול מדי.")
+                    if info.file_size and not info.compress_size:
+                        raise ValueError("הגיבוי מכיל נתון דחוס שאינו תקין.")
+                    if clean_name == "manifest.json" and info.file_size > 16 * 1024 * 1024:
+                        raise ValueError("קובץ פרטי הגיבוי גדול מדי.")
                     total_size += info.file_size
                     if total_size > max_total_size:
                         raise ValueError("הגיבוי גדול מדי לשחזור.")
@@ -1520,6 +1524,8 @@ class RecipeLibrary:
             self.db.close()
             moved_old_files = False
             moved_old_db = False
+            installed_new_files = False
+            installed_new_db = False
             try:
                 if self.files_dir.exists():
                     os.replace(self.files_dir, old_files)
@@ -1528,7 +1534,9 @@ class RecipeLibrary:
                     os.replace(self.db_path, old_db)
                     moved_old_db = True
                 os.replace(extracted_files, self.files_dir)
+                installed_new_files = True
                 os.replace(temp_db, self.db_path)
+                installed_new_db = True
                 self.db = sqlite3.connect(self.db_path)
                 self.db.row_factory = sqlite3.Row
                 self._ensure_schema()
@@ -1539,12 +1547,15 @@ class RecipeLibrary:
                         self.db.close()
                 except Exception:
                     pass
-                if self.files_dir.exists():
+                # Remove only the new locations that were actually installed.
+                # An early failure must never delete the user's original data.
+                if installed_new_files and self.files_dir.exists():
                     shutil.rmtree(self.files_dir, ignore_errors=True)
-                for sidecar in (Path(str(self.db_path) + "-wal"), Path(str(self.db_path) + "-shm")):
-                    sidecar.unlink(missing_ok=True)
-                if self.db_path.exists():
-                    self.db_path.unlink(missing_ok=True)
+                if installed_new_db:
+                    for sidecar in (Path(str(self.db_path) + "-wal"), Path(str(self.db_path) + "-shm")):
+                        sidecar.unlink(missing_ok=True)
+                    if self.db_path.exists():
+                        self.db_path.unlink(missing_ok=True)
                 if moved_old_files:
                     os.replace(old_files, self.files_dir)
                 if moved_old_db:

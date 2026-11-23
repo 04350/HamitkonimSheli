@@ -773,28 +773,32 @@ class בדיקותספרייה(unittest.TestCase):
                 self.assertTrue(library.import_one(second)[0])
                 before = {row["title"] for row in library.rows()}
                 original_replace = app.os.replace
-                calls = {"count": 0}
 
-                def fail_on_new_database(src, dst):
-                    calls["count"] += 1
-                    if calls["count"] == 4:
-                        raise OSError("simulated replacement failure")
-                    return original_replace(src, dst)
+                # Fail before any move, after the files directory moved, and
+                # after the new files directory was installed but before the DB.
+                for failure_call in (1, 2, 4):
+                    calls = {"count": 0}
 
-                with patch("app.os.replace", side_effect=fail_on_new_database):
-                    with self.assertRaises(OSError):
-                        library.restore_backup(backup)
+                    def fail_at_selected_replace(src, dst):
+                        calls["count"] += 1
+                        if calls["count"] == failure_call:
+                            raise OSError("simulated replacement failure")
+                        return original_replace(src, dst)
 
-                after = {row["title"] for row in library.rows()}
-                self.assertEqual(after, before)
-                for row in library.rows():
-                    self.assertTrue(Path(row["stored_path"]).is_file())
+                    with patch("app.os.replace", side_effect=fail_at_selected_replace):
+                        with self.assertRaises(OSError):
+                            library.restore_backup(backup)
+
+                    self.assertEqual({row["title"] for row in library.rows()}, before)
+                    for row in library.rows():
+                        self.assertTrue(Path(row["stored_path"]).is_file())
                 library.db.close()
         finally:
             if previous is None:
                 os.environ.pop("LOCALAPPDATA", None)
             else:
                 os.environ["LOCALAPPDATA"] = previous
+
 
     def test_גרסת_schema_מתועדת_במסד_הנתונים(self):
         previous = os.environ.get("LOCALAPPDATA")
