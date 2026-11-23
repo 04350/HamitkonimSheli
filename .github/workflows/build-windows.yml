@@ -71,6 +71,7 @@ jobs:
           from pathlib import Path
           from PIL import Image, ImageDraw, ImageFont
 
+          import subprocess
           sys.path.insert(0, "src")
           import ספריית_המתכונים as app
 
@@ -90,11 +91,20 @@ jobs:
           if not app.configure_ocr():
               raise SystemExit("Tesseract was not found by the application")
           tessdata_dir = (root / "tessdata").resolve()
-          tessdata_config = f'--tessdata-dir "{tessdata_dir.as_posix()}"'
-          languages = set(app.pytesseract.get_languages(config=tessdata_config))
-          if not {"eng", "heb", "heb4"}.issubset(languages):
-              raise SystemExit(f"Missing OCR languages from bundled tessdata: {languages}")
-          print(f"Tesseract bundled languages: {sorted(languages)}")
+          # Tesseract's language list can contain paths rather than bare names
+          # on Windows. Probe the binary and then load each model with real OCR.
+          listed = subprocess.run(
+              [app.pytesseract.pytesseract.tesseract_cmd, "--list-langs",
+               "--tessdata-dir", tessdata_dir.as_posix()],
+              capture_output=True, text=True, timeout=20
+          )
+          print("Tesseract --list-langs stdout:")
+          print(listed.stdout)
+          if listed.stderr.strip():
+              print("Tesseract --list-langs stderr:")
+              print(listed.stderr)
+          if listed.returncode:
+              raise SystemExit(f"Tesseract --list-langs failed: {listed.returncode}")
 
           image = Image.new("RGB", (900, 180), "white")
           draw = ImageDraw.Draw(image)
@@ -113,11 +123,19 @@ jobs:
               # Fallback for Pillow builds without the optional RTL layout engine.
               hebrew_draw.text((30, 35), hebrew_text[::-1], fill="black", font=font)
           recognized_hebrew = app.ocr_image(hebrew_image)
-          recognized_heb4 = app.pytesseract.image_to_string(
-              hebrew_image, lang="heb4+eng",
-              config=f'{tessdata_config} --oem 3 --psm 6', timeout=35
-          )
-          hebrew_image.close()
+          try:
+              recognized_heb4 = app.pytesseract.image_to_string(
+                  hebrew_image, lang="heb4+eng",
+                  config=f'--tessdata-dir "{tessdata_dir.as_posix()}" --oem 1 --psm 6',
+                  timeout=35
+              )
+          except app.pytesseract.TesseractError as exc:
+              raise SystemExit(
+                  "Tesseract could not load/use heb4.traineddata. "
+                  f"Exit status: {exc.status}; details: {exc.message}"
+              ) from exc
+          finally:
+              hebrew_image.close()
           hebrew_count = sum(1 for char in recognized_hebrew if "א" <= char <= "ת")
           heb4_count = sum(1 for char in recognized_heb4 if "א" <= char <= "ת")
           if hebrew_count < 6:
