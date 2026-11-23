@@ -89,7 +89,7 @@ jobs:
               raise SystemExit(
                   f"Wrong TESSDATA_PREFIX: {configured_tessdata_prefix}; expected {expected_tessdata_prefix}"
               )
-          tessdata_config = f'--tessdata-dir "{root}"'
+          tessdata_config = f'--tessdata-dir "{root.as_posix()}"'
           languages = set(app.pytesseract.get_languages(config=tessdata_config))
           if not {"eng", "heb", "heb4"}.issubset(languages):
               listed = app.pytesseract.run_tesseract(
