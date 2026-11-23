@@ -29,10 +29,11 @@ else
 fi
 export TESSDATA_PREFIX="$TESSDATA"
 train_candidate() {
-  local base="$1" name="$2" data="$WORK/data-$2" output="$WORK/output-$2"
+  local base="$1" name="$2" data="$WORK/data" output="$WORK/data/$2"
   echo "Fine-tuning $name from $base ..."
+  # tesstrain requires OUTPUT_DIR to be exactly DATA_DIR/MODEL_NAME.
   make -C "$TESSTRAIN" training MODEL_NAME="$name" START_MODEL="$base" TESSDATA="$TESSDATA" \
-    DATA_DIR="$data" OUTPUT_DIR="$output" LANGDATA_DIR="$WORK/langdata" \
+    DATA_DIR="$data" LANGDATA_DIR="$WORK/langdata" \
     GROUND_TRUTH_DIR="$TRAIN_DIR" MAX_ITERATIONS="$ITERATIONS" LANG_TYPE=RTL PSM=7 RATIO_TRAIN=0.90
   test -s "$output.traineddata"
   cp "$output.traineddata" "$TESSDATA/$name.traineddata"
