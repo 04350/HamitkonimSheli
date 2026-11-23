@@ -814,7 +814,7 @@ class בדיקותספרייה(unittest.TestCase):
                 self.assertTrue(original.import_one(source, relative_folder="מתכונים/שבת")[0])
                 stored = Path(original.rows()[0]["stored_path"])
                 old_style_path = (
-                    r"C:\Users\old-user\AppData\Local\ספריית המתכונים שלי\הקבצים שלי\מתכונים\שבת\"
+                    "C:\\Users\\old-user\\AppData\\Local\\ספריית המתכונים שלי\\הקבצים שלי\\מתכונים\\שבת\\"
                     + stored.name
                 )
                 db_copy = Path(temp) / "old-library.sqlite3"
@@ -878,6 +878,33 @@ class בדיקותספרייה(unittest.TestCase):
                 self.assertEqual(len(library.rows()), 1)
                 self.assertEqual(current_file.read_bytes(), original_data)
                 library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+
+    def test_שדרוג_מסד_נתונים_ישן_לגרסת_schema_שומר_נתונים(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "old-recipe.txt"
+                source.write_text("מתכון קיים", encoding="utf-8")
+                old_library = app.RecipeLibrary()
+                self.assertTrue(old_library.import_one(source)[0])
+                old_library.db.execute("PRAGMA user_version = 0")
+                old_library.db.commit()
+                old_library.db.close()
+
+                upgraded = app.RecipeLibrary()
+                self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 1)
+                self.assertEqual(len(upgraded.rows()), 1)
+                restored_path = Path(upgraded.rows()[0]["stored_path"])
+                self.assertTrue(restored_path.is_file())
+                self.assertEqual(restored_path.read_text(encoding="utf-8"), "מתכון קיים")
+                upgraded.db.close()
         finally:
             if previous is None:
                 os.environ.pop("LOCALAPPDATA", None)

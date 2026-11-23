@@ -1877,11 +1877,11 @@ class App:
                 "selected": "#EEE8F4", "danger": "#B83E4B", "sidebar_text": "#E8E1EF",
             },
         }
-        self.colors = dict(palettes.get(theme, palettes["שמנת"]))
+        self.colors = dict(palettes.get(theme, palettes["יוקרה"]))
         try:
             font_size = max(9, min(15, int(self.library.get_setting("font_size", "11"))))
         except (ValueError, TypeError):
-            font_size = 10
+            font_size = 11
 
         try:
             self.style.theme_use("clam")
