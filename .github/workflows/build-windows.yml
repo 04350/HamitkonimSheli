@@ -82,12 +82,9 @@ jobs:
           if not app.configure_ocr():
               raise SystemExit("Tesseract was not found by the application")
           languages = set(app.pytesseract.get_languages())
-          if not {"eng", "heb"}.issubset(languages):
-              raise SystemExit(f"Missing base OCR languages: {languages}")
-          print(f"Tesseract advertised languages: {sorted(languages)}")
-          # Some fine-tuned models carry an internal language identifier that
-          # differs from their filename, so validate the actual explicit model call
-          # below instead of requiring a particular --list-langs display name.
+          if not {"eng", "heb", "heb4"}.issubset(languages):
+              raise SystemExit(f"Missing OCR languages from bundled tessdata: {languages}")
+          print(f"Tesseract bundled languages: {sorted(languages)}")
 
           image = Image.new("RGB", (900, 180), "white")
           draw = ImageDraw.Draw(image)
