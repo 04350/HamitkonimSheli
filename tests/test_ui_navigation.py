@@ -40,7 +40,17 @@ class InAppNavigationTests(unittest.TestCase):
             self.assertIn(expected, source)
 
         self.assertNotIn('self.gallery_canvas.bind("<MouseWheel>"', source)
-        self.assertIn('APP_VERSION = "2.0.0"', source)
+        self.assertIn('APP_VERSION = "2.2.0"', source)
+        self.assertIn('"יוקרה": {', source)
+        self.assertIn('"יוקרה", "שמנת", "מרווה", "לילה"', source)
+        self.assertIn('width=240, bd=0', source)
+
+    def test_premium_theme_has_a_distinct_warm_forest_and_champagne_palette(self):
+        source = (ROOT / "src" / "ספריית_המתכונים.py").read_text(encoding="utf-8")
+        self.assertIn('\"accent\": \"#B58B59\"', source)
+        self.assertIn('\"sidebar\": \"#142E25\"', source)
+        self.assertIn('self.library.get_setting("color_theme", "יוקרה")', source)
+        self.assertIn('font=("Segoe UI", 30, "bold")', source)
 
     def test_screenshot_is_process_specific_and_checks_demo_data(self):
         capture = (ROOT / "scripts" / "capture_app_screenshot.py").read_text(encoding="utf-8")

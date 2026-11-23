@@ -1,6 +1,14 @@
 name: בניית התוכנה למחשב
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - '.github/workflows/build-windows.yml'
+      - 'tests/**'
+      - 'assets/**'
+      - 'scripts/**'
   push:
     branches: [main]
     paths:

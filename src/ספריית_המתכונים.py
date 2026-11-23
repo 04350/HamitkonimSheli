@@ -18,7 +18,7 @@ import zipfile
 import subprocess
 import webbrowser
 import xml.etree.ElementTree as ET
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
@@ -61,7 +61,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 def _rounded_points(x1, y1, x2, y2, radius=14, steps=8):
     """Create a polygon outline with smooth rounded corners."""
     width = max(1, x2 - x1)
@@ -565,6 +565,53 @@ def safe_title(value: str) -> str:
     value = re.sub(r"\s+", " ", value).strip(" .")
     return (value or "מסמך ללא כותרת")[:120]
 
+def _sha256_file(path: Path) -> str:
+    """Return a streaming SHA-256 digest without loading an attachment into memory."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _backup_relative_path(value, library_dir: Path) -> str | None:
+    """Recover a safe path relative to 'הקבצים שלי', including paths from another PC."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = Path(library_dir) / candidate
+    try:
+        relative = candidate.resolve().relative_to(Path(library_dir).resolve())
+        parts = relative.parts
+        if parts and all(part not in ("", ".", "..") and ":" not in part for part in parts):
+            return PurePosixPath(*parts).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        pass
+
+    normalized = raw.replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part not in ("", ".")]
+    markers = [index for index, part in enumerate(parts) if part.casefold() == "הקבצים שלי"]
+    if markers:
+        relative_parts = parts[markers[-1] + 1:]
+        if relative_parts and all(part not in ("", ".", "..") and ":" not in part for part in relative_parts):
+            return PurePosixPath(*relative_parts).as_posix()
+    return None
+
+
+def _validated_backup_relative_path(value) -> str:
+    """Validate and normalize a ZIP/manifest-relative path."""
+    raw = str(value or "").replace("\\", "/")
+    if not raw or raw.startswith("/") or "\x00" in raw:
+        raise ValueError("הגיבוי מכיל נתיב קובץ שאינו בטוח.")
+    parts = raw.split("/")
+    if any(part in ("", ".", "..") for part in parts) or ":" in parts[0]:
+        raise ValueError("הגיבוי מכיל נתיב קובץ שאינו בטוח.")
+    return PurePosixPath(*parts).as_posix()
+
+
 def unique_path(folder: Path, title: str, suffix: str) -> Path:
     base = safe_title(title)
     candidate = folder / (base + suffix)
@@ -890,6 +937,9 @@ class RecipeLibrary:
         self._ensure_schema()
 
     def _ensure_schema(self):
+        current_schema = int(self.db.execute("PRAGMA user_version").fetchone()[0])
+        if current_schema > 1:
+            raise RuntimeError("מסד הנתונים נוצר בגרסה חדשה יותר של התוכנה.")
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.execute("""
             CREATE TABLE IF NOT EXISTS items(
@@ -956,6 +1006,7 @@ class RecipeLibrary:
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_items_active_id ON items(is_deleted, id DESC)")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_items_favorite_id ON items(is_deleted, is_favorite, id DESC)")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_item_collections_collection_item ON item_collections(collection_id, item_id)")
+        self.db.execute("PRAGMA user_version = 1")
         self.db.commit()
 
     def rows(self, favorite_only: bool = False, collection_id: int | None = None, include_deleted: bool = False):
@@ -1144,8 +1195,30 @@ class RecipeLibrary:
         return str(row["value"]) if row else str(default)
 
     def create_backup(self, target: Path):
+        """Create a verified, portable backup and replace the destination atomically."""
         target = Path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
+        target_resolved = target.resolve()
+
+        # Snapshot the list before creating the temporary archive, so a destination
+        # inside the library cannot accidentally include itself in its own backup.
+        library_root = self.files_dir.resolve()
+        files = []
+        for path in sorted(self.files_dir.rglob("*"), key=lambda item: item.as_posix().casefold()):
+            if path.is_symlink():
+                raise ValueError(f"קובץ מקושר אינו נתמך בגיבוי: {path.name}")
+            if not path.is_file():
+                continue
+            resolved = path.resolve()
+            if resolved == target_resolved:
+                continue
+            try:
+                relative = resolved.relative_to(library_root).as_posix()
+            except ValueError as exc:
+                raise ValueError(f"קובץ מחוץ לתיקיית הספרייה: {path.name}") from exc
+            relative = _validated_backup_relative_path(relative)
+            files.append((path, relative))
+
         with tempfile.TemporaryDirectory(prefix="recipe-backup-") as temp:
             db_copy = Path(temp) / "library.sqlite3"
             backup_db = sqlite3.connect(db_copy)
@@ -1154,75 +1227,292 @@ class RecipeLibrary:
                 self.db.backup(backup_db)
             finally:
                 backup_db.close()
-            with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
-                archive.write(db_copy, "הספרייה.sqlite3")
-                for path in self.files_dir.rglob("*"):
-                    if path.is_file():
-                        archive.write(path, "הקבצים שלי/" + path.relative_to(self.files_dir).as_posix())
+
+            file_manifest = []
+            included_paths = set()
+            for path, relative in files:
+                file_manifest.append({
+                    "path": relative,
+                    "size": path.stat().st_size,
+                    "sha256": _sha256_file(path),
+                })
+                included_paths.add(relative.casefold())
+
+            item_manifest = []
+            for row in self.db.execute("SELECT id, stored_path FROM items ORDER BY id").fetchall():
+                relative = _backup_relative_path(row["stored_path"], self.files_dir)
+                if relative and relative.casefold() not in included_paths:
+                    relative = None
+                item_manifest.append({"id": int(row["id"]), "path": relative})
+
+            manifest = {
+                "format": "hamitkonim-sheli-backup",
+                "format_version": 2,
+                "application_version": APP_VERSION,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "database": {
+                    "path": "הספרייה.sqlite3",
+                    "size": db_copy.stat().st_size,
+                    "sha256": _sha256_file(db_copy),
+                },
+                "files": file_manifest,
+                "items": item_manifest,
+            }
+
+            fd, temporary_name = tempfile.mkstemp(
+                prefix="." + target.name + ".", suffix=".tmp", dir=str(target.parent)
+            )
+            os.close(fd)
+            temporary_archive = Path(temporary_name)
+            try:
+                with zipfile.ZipFile(
+                    temporary_archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+                ) as archive:
+                    archive.write(db_copy, "הספרייה.sqlite3")
+                    for path, relative in files:
+                        archive.write(path, "הקבצים שלי/" + relative)
+                    archive.writestr(
+                        "manifest.json",
+                        json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2),
+                    )
+
+                with zipfile.ZipFile(temporary_archive, "r") as archive:
+                    damaged_entry = archive.testzip()
+                    if damaged_entry is not None:
+                        raise ValueError(f"קובץ הגיבוי לא עבר בדיקת תקינות: {damaged_entry}")
+
+                os.replace(temporary_archive, target)
+            except Exception:
+                temporary_archive.unlink(missing_ok=True)
+                raise
 
     def restore_backup(self, source: Path) -> int:
+        """Validate a backup completely before replacing the current library."""
         source = Path(source)
         if not source.is_file() or not zipfile.is_zipfile(source):
             raise ValueError("קובץ הגיבוי אינו ZIP תקין.")
+
         temp_root = Path(tempfile.mkdtemp(prefix="recipe-restore-", dir=self.home))
         temp_db = temp_root / "הספרייה.sqlite3"
+        temp_manifest = temp_root / "manifest.json"
         extracted_files = temp_root / "הקבצים שלי"
         extracted_files.mkdir()
         total_size = 0
+        max_entries = 50000
+        max_total_size = 2 * 1024 * 1024 * 1024
+        max_entry_size = 1024 * 1024 * 1024
+
         try:
             with zipfile.ZipFile(source, "r") as archive:
-                names = archive.namelist()
-                if "הספרייה.sqlite3" not in names:
-                    raise ValueError("הגיבוי לא מכיל את מסד הנתונים של הספרייה.")
-                for info in archive.infolist():
-                    name = info.filename.replace("\\", "/")
-                    parts = Path(name).parts
-                    if name.startswith("/") or ".." in parts or (len(parts) and ":" in parts[0]):
+                infos = archive.infolist()
+                if len(infos) > max_entries:
+                    raise ValueError("הגיבוי מכיל יותר מדי קבצים.")
+                seen_names = set()
+                database_info = None
+                manifest_info = None
+                payload_infos = []
+
+                for info in infos:
+                    normalized = info.filename.replace("\\", "/")
+                    clean_name = normalized.rstrip("/")
+                    if (
+                        not clean_name
+                        or normalized.startswith("/")
+                        or "\x00" in normalized
+                        or any(part in (".", "..") for part in clean_name.split("/"))
+                        or ":" in clean_name.split("/")[0]
+                    ):
                         raise ValueError("הגיבוי מכיל נתיב קובץ שאינו בטוח.")
-                    if name == "הספרייה.sqlite3":
-                        destination = temp_db
-                    elif name.startswith("הקבצים שלי/"):
-                        relative = name[len("הקבצים שלי/"):]
-                        parts = [part for part in relative.split("/") if part not in ("", ".")]
-                        if not parts:
-                            continue
-                        if any(part == ".." or ":" in part for part in parts):
-                            raise ValueError("הגיבוי מכיל נתיב קובץ שאינו בטוח.")
-                        destination = extracted_files.joinpath(*parts)
-                        if not destination.resolve().is_relative_to(extracted_files.resolve()):
-                            raise ValueError("הגיבוי מכיל נתיב קובץ מחוץ לתיקיית הספרייה.")
-                    else:
-                        continue
-                    if info.is_dir():
-                        destination.mkdir(parents=True, exist_ok=True)
-                        continue
+
+                    key = clean_name.casefold()
+                    if key in seen_names:
+                        raise ValueError("הגיבוי מכיל שמות קבצים כפולים.")
+                    seen_names.add(key)
+
+                    file_type = (info.external_attr >> 16) & 0o170000
+                    if file_type == 0o120000:
+                        raise ValueError("הגיבוי מכיל קישור סמלי שאינו נתמך.")
+                    if info.flag_bits & 0x1:
+                        raise ValueError("הגיבוי מכיל קובץ ZIP מוצפן שאינו נתמך.")
+                    if info.file_size > max_entry_size:
+                        raise ValueError("אחד הקבצים בגיבוי גדול מדי.")
                     total_size += info.file_size
-                    if total_size > 2 * 1024 * 1024 * 1024:
+                    if total_size > max_total_size:
                         raise ValueError("הגיבוי גדול מדי לשחזור.")
+                    if (
+                        info.file_size > 64 * 1024 * 1024
+                        and info.compress_size > 0
+                        and info.file_size / info.compress_size > 1000
+                    ):
+                        raise ValueError("הגיבוי מכיל קובץ עם יחס דחיסה חריג.")
+
+                    if info.is_dir():
+                        if clean_name != "הקבצים שלי":
+                            raise ValueError("הגיבוי מכיל תיקייה לא מוכרת.")
+                        continue
+                    if clean_name == "הספרייה.sqlite3":
+                        database_info = info
+                    elif clean_name == "manifest.json":
+                        manifest_info = info
+                    elif normalized.startswith("הקבצים שלי/"):
+                        relative = _validated_backup_relative_path(
+                            normalized[len("הקבצים שלי/"):]
+                        )
+                        payload_infos.append((info, relative))
+                    else:
+                        raise ValueError("הגיבוי מכיל קובץ לא מוכר.")
+
+                if database_info is None:
+                    raise ValueError("הגיבוי לא מכיל את מסד הנתונים של הספרייה.")
+
+                for info, relative in payload_infos:
+                    destination = extracted_files.joinpath(*relative.split("/"))
+                    if not destination.resolve().is_relative_to(extracted_files.resolve()):
+                        raise ValueError("הגיבוי מכיל נתיב קובץ מחוץ לתיקיית הספרייה.")
                     destination.parent.mkdir(parents=True, exist_ok=True)
-                    with archive.open(info) as src, destination.open("wb") as dst:
-                        shutil.copyfileobj(src, dst)
+                    with archive.open(info) as archived_file, destination.open("xb") as output_file:
+                        shutil.copyfileobj(archived_file, output_file)
+
+                with archive.open(database_info) as archived_file, temp_db.open("xb") as output_file:
+                    shutil.copyfileobj(archived_file, output_file)
+                if manifest_info is not None:
+                    with archive.open(manifest_info) as archived_file, temp_manifest.open("xb") as output_file:
+                        shutil.copyfileobj(archived_file, output_file)
+
             if not temp_db.is_file():
                 raise ValueError("מסד הנתונים לא חולץ.")
+
+            manifest = None
+            if temp_manifest.is_file():
+                try:
+                    manifest = json.loads(temp_manifest.read_text(encoding="utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError("קובץ פרטי הגיבוי אינו תקין.") from exc
+                if not isinstance(manifest, dict) or manifest.get("format") != "hamitkonim-sheli-backup":
+                    raise ValueError("קובץ פרטי הגיבוי אינו מזוהה.")
+                if manifest.get("format_version") != 2:
+                    raise ValueError("גרסת הגיבוי אינה נתמכת.")
+
+                database_manifest = manifest.get("database") or {}
+                if (
+                    int(database_manifest.get("size", -1)) != temp_db.stat().st_size
+                    or str(database_manifest.get("sha256", "")) != _sha256_file(temp_db)
+                ):
+                    raise ValueError("מסד הנתונים בגיבוי אינו תואם לפרטי האימות.")
+
+                manifest_files = {}
+                for entry in manifest.get("files", []):
+                    if not isinstance(entry, dict):
+                        raise ValueError("רשימת הקבצים בגיבוי אינה תקינה.")
+                    relative = _validated_backup_relative_path(entry.get("path"))
+                    key = relative.casefold()
+                    if key in manifest_files:
+                        raise ValueError("רשימת הקבצים בגיבוי מכילה כפילויות.")
+                    staged = extracted_files.joinpath(*relative.split("/"))
+                    if (
+                        not staged.is_file()
+                        or int(entry.get("size", -1)) != staged.stat().st_size
+                        or str(entry.get("sha256", "")) != _sha256_file(staged)
+                    ):
+                        raise ValueError(f"קובץ בגיבוי חסר או פגום: {relative}")
+                    manifest_files[key] = relative
+
+                actual_files = {
+                    path.relative_to(extracted_files).as_posix().casefold()
+                    for path in extracted_files.rglob("*") if path.is_file()
+                }
+                if actual_files != set(manifest_files):
+                    raise ValueError("תכולת הקבצים בגיבוי אינה תואמת לרשימת האימות.")
+
+                item_paths = {}
+                for entry in manifest.get("items", []):
+                    if not isinstance(entry, dict):
+                        raise ValueError("רשימת פריטי הספרייה בגיבוי אינה תקינה.")
+                    item_id = int(entry.get("id"))
+                    if item_id in item_paths:
+                        raise ValueError("רשימת פריטי הספרייה בגיבוי מכילה כפילויות.")
+                    relative = entry.get("path")
+                    if relative is not None:
+                        relative = _validated_backup_relative_path(relative)
+                        if relative.casefold() not in manifest_files:
+                            raise ValueError("רשומת ספרייה מפנה לקובץ שאינו נמצא בגיבוי.")
+                    item_paths[item_id] = relative
+            else:
+                # Backward compatibility with backups created before format version 2.
+                manifest_files = {
+                    path.relative_to(extracted_files).as_posix().casefold():
+                    path.relative_to(extracted_files).as_posix()
+                    for path in extracted_files.rglob("*") if path.is_file()
+                }
+                item_paths = None
+
             check_db = sqlite3.connect(temp_db)
             check_db.row_factory = sqlite3.Row
-            integrity = check_db.execute("PRAGMA quick_check").fetchone()[0]
-            if integrity != "ok":
-                check_db.close()
-                raise ValueError("מסד הנתונים שבגיבוי אינו תקין.")
-            if not check_db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='items'").fetchone():
-                check_db.close()
-                raise ValueError("הקובץ אינו גיבוי של ספריית המתכונים.")
-            rows = check_db.execute("SELECT id,stored_path FROM items").fetchall()
-            for row in rows:
-                filename = Path(str(row["stored_path"])).name
-                if filename and (extracted_files / filename).is_file():
-                    check_db.execute(
-                        "UPDATE items SET stored_path=? WHERE id=?",
-                        (str(self.files_dir / filename), int(row["id"]))
+            try:
+                integrity = check_db.execute("PRAGMA quick_check").fetchone()[0]
+                if integrity != "ok":
+                    raise ValueError("מסד הנתונים שבגיבוי אינו תקין.")
+                if not check_db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='items'"
+                ).fetchone():
+                    raise ValueError("הקובץ אינו גיבוי של ספריית המתכונים.")
+
+                rows = check_db.execute(
+                    "SELECT id, stored_path, recipe_data FROM items ORDER BY id"
+                ).fetchall()
+                row_ids = {int(row["id"]) for row in rows}
+                if item_paths is not None and row_ids != set(item_paths):
+                    raise ValueError("רשימת הפריטים בגיבוי אינה תואמת למסד הנתונים.")
+
+                basename_matches = {}
+                if item_paths is None:
+                    for path in extracted_files.rglob("*"):
+                        if path.is_file():
+                            basename_matches.setdefault(path.name.casefold(), []).append(
+                                path.relative_to(extracted_files).as_posix()
+                            )
+
+                for row in rows:
+                    item_id = int(row["id"])
+                    relative = (
+                        item_paths.get(item_id)
+                        if item_paths is not None
+                        else _backup_relative_path(row["stored_path"], self.files_dir)
                     )
-            check_db.commit()
-            check_db.close()
+                    if item_paths is None and not relative:
+                        candidates = basename_matches.get(
+                            Path(str(row["stored_path"])).name.casefold(), []
+                        )
+                        relative = candidates[0] if len(candidates) == 1 else None
+
+                    if relative:
+                        staged = extracted_files.joinpath(*relative.split("/"))
+                        if staged.is_file():
+                            check_db.execute(
+                                "UPDATE items SET stored_path=? WHERE id=?",
+                                (str(self.files_dir.joinpath(*relative.split("/"))), item_id),
+                            )
+
+                    try:
+                        recipe_data = json.loads(row["recipe_data"] or "{}")
+                    except (TypeError, ValueError):
+                        recipe_data = {}
+                    if isinstance(recipe_data, dict) and recipe_data.get("image_path"):
+                        image_relative = _backup_relative_path(
+                            recipe_data.get("image_path"), self.files_dir
+                        )
+                        if image_relative and image_relative.casefold() in manifest_files:
+                            recipe_data["image_path"] = str(
+                                self.files_dir.joinpath(*manifest_files[image_relative.casefold()].split("/"))
+                            )
+                            check_db.execute(
+                                "UPDATE items SET recipe_data=? WHERE id=?",
+                                (json.dumps(recipe_data, ensure_ascii=False), item_id),
+                            )
+                check_db.commit()
+                restored_count = len(rows)
+            finally:
+                check_db.close()
 
             old_files = temp_root / "old_files"
             old_db = temp_root / "old_library.sqlite3"
@@ -1238,7 +1528,7 @@ class RecipeLibrary:
                     os.replace(self.db_path, old_db)
                     moved_old_db = True
                 os.replace(extracted_files, self.files_dir)
-                shutil.copy2(temp_db, self.db_path)
+                os.replace(temp_db, self.db_path)
                 self.db = sqlite3.connect(self.db_path)
                 self.db.row_factory = sqlite3.Row
                 self._ensure_schema()
@@ -1251,6 +1541,8 @@ class RecipeLibrary:
                     pass
                 if self.files_dir.exists():
                     shutil.rmtree(self.files_dir, ignore_errors=True)
+                for sidecar in (Path(str(self.db_path) + "-wal"), Path(str(self.db_path) + "-shm")):
+                    sidecar.unlink(missing_ok=True)
                 if self.db_path.exists():
                     self.db_path.unlink(missing_ok=True)
                 if moved_old_files:
@@ -1261,9 +1553,10 @@ class RecipeLibrary:
                 self.db.row_factory = sqlite3.Row
                 self._ensure_schema()
                 raise
-            return len(rows)
+            return restored_count
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
+
 
     def set_favorite(self, item_id: int, is_favorite: bool):
         self.db.execute(
@@ -1443,7 +1736,7 @@ class App:
                 self.root.iconbitmap(default=str(icon_path))
         except (tk.TclError, OSError):
             pass
-        self.root.geometry("1680x960")
+        self.root.geometry("1680x980")
         self.root.minsize(1120, 720)
         self.style = ttk.Style(self.root)
         self._apply_styles()
@@ -1498,8 +1791,17 @@ class App:
 
     def _apply_styles(self):
         """Premium warm cookbook theme with consistent hierarchy and calm surfaces."""
-        theme = self.library.get_setting("color_theme", "שמנת")
+        theme = self.library.get_setting("color_theme", "יוקרה")
         palettes = {
+            "יוקרה": {
+                "background": "#F3F0E8", "surface": "#FFFEFA", "navy": "#18372D",
+                "hero": "#142F26", "text": "#2B3C32", "muted": "#7E887F",
+                "border": "#E4DED2", "accent": "#B58B59", "accent_hover": "#987044",
+                "row_alt": "#F8F6F0", "selected": "#E7EFE7", "danger": "#B44F52",
+                "sidebar": "#142E25", "sidebar_active": "#2A493A",
+                "cover": "#ECE5D8", "shadow": "#E5DED1", "soft": "#EEF1E9",
+                "pill": "#F2EBDD", "pill_text": "#80633F", "sidebar_text": "#E4EAE2",
+            },
             "שמנת": {
                 "background": "#F4F1E9", "surface": "#FFFFFF", "navy": "#263D32",
                 "hero": "#20392F", "text": "#304238", "muted": "#89938B",
@@ -1557,7 +1859,7 @@ class App:
         }
         self.colors = dict(palettes.get(theme, palettes["שמנת"]))
         try:
-            font_size = max(9, min(15, int(self.library.get_setting("font_size", "10"))))
+            font_size = max(9, min(15, int(self.library.get_setting("font_size", "11"))))
         except (ValueError, TypeError):
             font_size = 10
 
@@ -1573,11 +1875,11 @@ class App:
         self.style.configure("Panel.TFrame", background=c["surface"])
         self.style.configure("Panel.TLabel", background=c["surface"], foreground=c["text"])
         self.style.configure("Muted.TLabel", background=c["surface"], foreground=c["muted"], font=("Segoe UI", 9))
-        self.style.configure("Section.TLabel", background=c["surface"], foreground=c["navy"], font=("Segoe UI", 14, "bold"))
+        self.style.configure("Section.TLabel", background=c["surface"], foreground=c["navy"], font=("Segoe UI", 15, "bold"))
         self.style.configure("Status.TLabel", background=c["background"], foreground=c["muted"], padding=(10, 7), font=("Segoe UI", 9))
         self.style.configure(
             "TButton", font=("Segoe UI", max(9, font_size - 1), "bold"),
-            padding=(15, 10), background=c["soft"], foreground=c["navy"],
+            padding=(16, 11), background=c["soft"], foreground=c["navy"],
             bordercolor=c["border"], focuscolor=c["accent"], relief="flat"
         )
         self.style.map(
@@ -1587,7 +1889,7 @@ class App:
         )
         self.style.configure(
             "Primary.TButton", background=c["accent"], foreground="#FFFFFF",
-            bordercolor=c["accent"], padding=(17, 11)
+            bordercolor=c["accent"], padding=(18, 12)
         )
         self.style.map(
             "Primary.TButton",
@@ -1617,7 +1919,7 @@ class App:
             foreground=[("readonly", c["navy"])]
         )
         self.style.configure(
-            "Treeview", rowheight=44, font=("Segoe UI", 10),
+            "Treeview", rowheight=46, font=("Segoe UI", 10),
             background=c["surface"], fieldbackground=c["surface"],
             foreground=c["text"], bordercolor=c["border"], borderwidth=0
         )
@@ -1767,11 +2069,11 @@ class App:
         self.shell = tk.Frame(self.root, bg=c["background"], bd=0)
         self.shell.pack(fill="both", expand=True)
 
-        sidebar = tk.Frame(self.shell, bg=c["sidebar"], width=226, bd=0)
+        sidebar = tk.Frame(self.shell, bg=c["sidebar"], width=240, bd=0)
         sidebar.pack(side="right", fill="y")
         sidebar.pack_propagate(False)
 
-        brand = tk.Frame(sidebar, bg=c["sidebar"], padx=22, pady=24)
+        brand = tk.Frame(sidebar, bg=c["sidebar"], padx=24, pady=26)
         brand.pack(fill="x")
         mark = tk.Canvas(brand, width=48, height=48, bg=c["sidebar"], highlightthickness=0, bd=0)
         mark.pack(anchor="e")
@@ -1839,17 +2141,17 @@ class App:
         self.workspace_scroll_frame.pack(fill="both", expand=True)
         workspace = tk.Frame(
             self.workspace_scroll_frame.content, bg=c["background"],
-            padx=26, pady=23,
+            padx=30, pady=26,
         )
         workspace.pack(fill="both", expand=True)
         self.workspace = workspace
         header = tk.Frame(workspace, bg=c["background"])
-        header.pack(fill="x", pady=(0, 17))
+        header.pack(fill="x", pady=(0, 20))
         heading = tk.Frame(header, bg=c["background"])
         heading.pack(side="right", fill="x", expand=True)
         self.page_title_label = tk.Label(
             heading, text="המתכונים שלי", bg=c["background"], fg=c["navy"],
-            font=("Segoe UI", 27, "bold"), anchor="e"
+            font=("Segoe UI", 30, "bold"), anchor="e"
         )
         self.page_title_label.pack(fill="x")
         self.page_subtitle_label = tk.Label(
@@ -2083,13 +2385,13 @@ class App:
         button = ModernButton(
             parent, text=f"{glyph}    {label}",
             command=lambda value=key: self._navigate(value),
-            width=190, height=43, bg=self.colors["sidebar"],
+            width=204, height=46, bg=self.colors["sidebar"],
             fg=self.colors["sidebar_text"], hover_bg=self.colors["sidebar_active"],
             active_bg=self.colors["sidebar_active"], active_fg="#FFFFFF",
             radius=12, font=("Segoe UI", 10, "bold"), align="right",
-            canvas_bg=self.colors["sidebar"], padx=18
+            canvas_bg=self.colors["sidebar"], padx=20
         )
-        button.pack(fill="x", padx=12, pady=3)
+        button.pack(fill="x", padx=13, pady=4)
         self.nav_buttons[key] = button
 
     def _update_navigation_active(self):
@@ -2327,8 +2629,8 @@ class App:
                 self.gallery_inner, surface=self.colors["surface"],
                 background=self.colors["surface"],
                 outline=self.colors["accent"] if selected else self.colors["border"],
-                shadow=self.colors["shadow"], radius=18, padding=1,
-                width=280, height=264, show_shadow=True
+                shadow=self.colors["shadow"], radius=22, padding=1,
+                width=286, height=270, show_shadow=True
             )
             card.grid(
                 row=index // columns, column=columns - 1 - (index % columns),
@@ -2341,7 +2643,7 @@ class App:
             if not image_path and row["extension"].lower() in IMAGE_TYPES:
                 image_path = row["stored_path"]
 
-            media = tk.Frame(body, bg=self.colors["cover"], height=145)
+            media = tk.Frame(body, bg=self.colors["cover"], height=150)
             media.pack(fill="x", padx=10, pady=(10, 8))
             media.pack_propagate(False)
             preview = self._gallery_photo(image_path) if image_path else None
@@ -4532,8 +4834,8 @@ class App:
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="הגדרות הספרייה", style="Section.TLabel").pack(fill="x", pady=(0, 12))
 
-        theme_var = tk.StringVar(value=self.library.get_setting("color_theme", "שמנת"))
-        font_var = tk.StringVar(value=self.library.get_setting("font_size", "10"))
+        theme_var = tk.StringVar(value=self.library.get_setting("color_theme", "יוקרה"))
+        font_var = tk.StringVar(value=self.library.get_setting("font_size", "11"))
         zoom_var = tk.StringVar(value=self.library.get_setting("preview_zoom", "1.0"))
         auto_var = tk.BooleanVar(value=self.library.get_setting("auto_backup_enabled", "0") == "1")
         days_var = tk.StringVar(value=self.library.get_setting("auto_backup_days", "7"))
@@ -4548,8 +4850,8 @@ class App:
             ).pack(side="right")
             return row
 
-        option_row("ערכת עיצוב:", theme_var, ["שמנת", "מרווה", "לילה", "כחול", "ירוק", "סגול"])
-        option_row("גודל גופן:", font_var, ["9", "10", "11", "12", "13", "14"])
+        option_row("ערכת עיצוב:", theme_var, ["יוקרה", "שמנת", "מרווה", "לילה", "כחול", "ירוק", "סגול"])
+        option_row("גודל גופן:", font_var, ["9", "10", "11", "12", "13", "14", "15"])
         option_row("גודל תצוגה מקדימה:", zoom_var, ["0.75", "1.0", "1.25", "1.5"])
         ttk.Checkbutton(
             frame, text="הפעלת גיבוי אוטומטי",
