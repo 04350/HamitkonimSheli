@@ -223,11 +223,21 @@ def best_title_from_pdf_page(page) -> str:
         return ""
 
 
+def _tesseract_config(psm: int, tessdata_dir=None) -> str:
+    """Build an OCR config with an explicit local tessdata parent when available."""
+    prefix = ""
+    if tessdata_dir:
+        escaped = str(tessdata_dir).replace('"', r'\"')
+        prefix = f'--tessdata-dir "{escaped}" '
+    return f"{prefix}--oem 3 --psm {psm}"
+
+
 def _recognize_attempt(
-    image, pytesseract_module, psm: int, language: str = "heb+eng"
+    image, pytesseract_module, psm: int, language: str = "heb+eng",
+    tessdata_dir=None,
 ) -> dict[str, Any] | None:
     data = pytesseract_module.image_to_data(
-        image, lang=language, config=f"--oem 3 --psm {psm}",
+        image, lang=language, config=_tesseract_config(psm, tessdata_dir),
         output_type=pytesseract_module.Output.DICT, timeout=35,
     )
     lines = lines_from_tesseract_data(data)
@@ -246,19 +256,22 @@ def _recognize_attempt(
 
 
 def _safe_recognize_attempt(
-    image, pytesseract_module, psm: int, language: str = "heb+eng"
+    image, pytesseract_module, psm: int, language: str = "heb+eng",
+    tessdata_dir=None,
 ) -> dict[str, Any] | None:
     """A missing optional OCR model must not discard a valid primary result."""
     try:
-        return _recognize_attempt(image, pytesseract_module, psm, language)
+        return _recognize_attempt(image, pytesseract_module, psm, language, tessdata_dir)
     except Exception:
         return None
 
 
 def recognize_image(
-    image, pytesseract_module=None, alternate_languages: tuple[str, ...] = ()
+    image, pytesseract_module=None, alternate_languages: tuple[str, ...] = (),
+    tessdata_dir=None,
 ) -> dict[str, Any]:
     """Recognize recipe scans locally, retrying weak results with alternate layouts/models."""
+
     empty = {"text": "", "title": "", "lines": [], "confidence": 0.0}
     if pytesseract_module is None:
         try:
@@ -273,7 +286,7 @@ def recognize_image(
     rotated_images = []
     try:
         enhanced, threshold = preprocess_image(image)
-        first = _safe_recognize_attempt(enhanced, pytesseract_module, 6)
+        first = _safe_recognize_attempt(enhanced, pytesseract_module, 6, tessdata_dir=tessdata_dir)
         if first:
             attempts.append(first)
         first_text_length = len(re.sub(r"\s+", "", first["text"])) if first else 0
@@ -284,7 +297,7 @@ def recognize_image(
             or not first["title"]
         )
         if retry_needed:
-            second = _safe_recognize_attempt(enhanced, pytesseract_module, 11)
+            second = _safe_recognize_attempt(enhanced, pytesseract_module, 11, tessdata_dir=tessdata_dir)
             if second:
                 attempts.append(second)
 
@@ -292,13 +305,13 @@ def recognize_image(
             # cookbooks and recipe sheets with more than one text column.
             current_best = max(attempts, key=lambda item: item["quality"]) if attempts else None
             if current_best is None or current_best["confidence"] < 55 or not current_best["title"]:
-                page_layout = _safe_recognize_attempt(enhanced, pytesseract_module, 3)
+                page_layout = _safe_recognize_attempt(enhanced, pytesseract_module, 3, tessdata_dir=tessdata_dir)
                 if page_layout:
                     attempts.append(page_layout)
 
             current_best = max(attempts, key=lambda item: item["quality"]) if attempts else None
             if current_best is None or current_best["quality"] < 120:
-                third = _safe_recognize_attempt(threshold, pytesseract_module, 6)
+                third = _safe_recognize_attempt(threshold, pytesseract_module, 6, tessdata_dir=tessdata_dir)
                 if third:
                     attempts.append(third)
 
@@ -318,7 +331,7 @@ def recognize_image(
                     if not language or language == "heb+eng":
                         continue
                     alternate = _safe_recognize_attempt(
-                        enhanced, pytesseract_module, 6, language
+                        enhanced, pytesseract_module, 6, language, tessdata_dir
                     )
                     if alternate:
                         attempts.append(alternate)
@@ -326,7 +339,7 @@ def recognize_image(
                         alternate["confidence"] < 55 or not alternate["title"]
                     ):
                         alternate_layout = _safe_recognize_attempt(
-                            enhanced, pytesseract_module, 3, language
+                            enhanced, pytesseract_module, 3, language, tessdata_dir
                         )
                         if alternate_layout:
                             attempts.append(alternate_layout)
@@ -338,7 +351,7 @@ def recognize_image(
             for angle in (90, 180, 270):
                 rotated = enhanced.rotate(angle, expand=True)
                 rotated_images.append(rotated)
-                candidate = _safe_recognize_attempt(rotated, pytesseract_module, 6)
+                candidate = _safe_recognize_attempt(rotated, pytesseract_module, 6, tessdata_dir=tessdata_dir)
                 if candidate:
                     attempts.append(candidate)
                     best = max(attempts, key=lambda item: item["quality"])
@@ -351,7 +364,7 @@ def recognize_image(
             return {key: best[key] for key in ("text", "title", "lines", "confidence")}
         try:
             fallback = pytesseract_module.image_to_string(
-                enhanced, lang="heb+eng", config="--oem 3 --psm 6", timeout=35
+                enhanced, lang="heb+eng", config=_tesseract_config(6, tessdata_dir), timeout=35
             )
         except Exception:
             fallback = ""
