@@ -107,6 +107,60 @@ class RecipeScannerTests(unittest.TestCase):
         self.assertEqual(fake.image_to_data.call_count, 2)
 
 
+    def test_page_layout_retry_can_recover_multi_column_text(self):
+        class FakeOutput:
+            DICT = "dict"
+
+        poor = {
+            "text": ["x"], "conf": ["5"], "left": ["1"], "top": ["1"],
+            "width": ["1"], "height": ["1"], "block_num": ["1"],
+            "par_num": ["1"], "line_num": ["1"],
+        }
+        good = {
+            "text": ["עוגת", "תפוחים"], "conf": ["94", "96"],
+            "left": ["10", "150"], "top": ["35", "35"],
+            "width": ["100", "100"], "height": ["42", "42"],
+            "block_num": ["1", "1"], "par_num": ["1", "1"], "line_num": ["1", "1"],
+        }
+        fake = Mock()
+        fake.Output = FakeOutput
+        fake.image_to_data.side_effect = [poor, poor, good]
+        image = Image.new("RGB", (900, 1200), "white")
+        try:
+            result = recognize_image(image, fake)
+        finally:
+            image.close()
+        self.assertIn("עוגת", result["text"])
+        self.assertEqual(fake.image_to_data.call_count, 3)
+        self.assertIn("--psm 3", fake.image_to_data.call_args_list[-1].kwargs["config"])
+
+    def test_alternate_hebrew_model_is_used_only_after_weak_primary_result(self):
+        class FakeOutput:
+            DICT = "dict"
+
+        poor = {
+            "text": ["x"], "conf": ["5"], "left": ["1"], "top": ["1"],
+            "width": ["1"], "height": ["1"], "block_num": ["1"],
+            "par_num": ["1"], "line_num": ["1"],
+        }
+        good = {
+            "text": ["עוגת", "תפוחים"], "conf": ["94", "96"],
+            "left": ["10", "150"], "top": ["35", "35"],
+            "width": ["100", "100"], "height": ["42", "42"],
+            "block_num": ["1", "1"], "par_num": ["1", "1"], "line_num": ["1", "1"],
+        }
+        fake = Mock()
+        fake.Output = FakeOutput
+        fake.image_to_data.side_effect = [poor, poor, poor, poor, good]
+        image = Image.new("RGB", (900, 500), "white")
+        try:
+            result = recognize_image(image, fake, alternate_languages=("heb4+eng",))
+        finally:
+            image.close()
+        self.assertIn("עוגת", result["text"])
+        self.assertEqual(fake.image_to_data.call_count, 5)
+        self.assertEqual(fake.image_to_data.call_args_list[-1].kwargs["lang"], "heb4+eng")
+
     def test_otsu_threshold_adapts_to_light_and_dark_pixels(self):
         image = Image.new("L", (200, 100), 245)
         for x in range(0, 100):
@@ -147,7 +201,7 @@ class RecipeScannerTests(unittest.TestCase):
             "width": ["100", "100"], "height": ["42", "42"],
             "block_num": ["1", "1"], "par_num": ["1", "1"], "line_num": ["1", "1"],
         }
-        responses = [poor, poor, poor, good]
+        responses = [poor, poor, poor, poor, good]
         seen_sizes = []
 
         def fake_ocr(candidate, **kwargs):

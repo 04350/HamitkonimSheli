@@ -45,6 +45,15 @@ jobs:
           Copy-Item 'C:\Program Files\Tesseract-OCR\*.dll' tesseract/ -ErrorAction SilentlyContinue
           Copy-Item 'C:\Program Files\Tesseract-OCR\tessdata\eng.traineddata' tesseract/tessdata/
           Invoke-WebRequest -Uri 'https://github.com/tesseract-ocr/tessdata_best/raw/main/heb.traineddata' -OutFile 'tesseract/tessdata/heb.traineddata'
+          # The extra Hebrew model is pinned to an upstream commit and SHA-256
+          # verified here. The model is bundled into the app; users never download it.
+          $heb4Uri = 'https://raw.githubusercontent.com/boro11204/hebrew-ocr-offline/30ae3e5513d5c132ecdfeb03730fa0b723a2180f/models/heb4.traineddata'
+          Invoke-WebRequest -Uri $heb4Uri -OutFile 'tesseract/tessdata/heb4.traineddata'
+          $expectedHeb4Sha256 = 'a1422a71e9e7d060b5cc0c08e3060cc5e7a9a9ea41ecc0da43ec07d8946769a6'
+          $actualHeb4Sha256 = (Get-FileHash 'tesseract/tessdata/heb4.traineddata' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHeb4Sha256 -ne $expectedHeb4Sha256) { throw "heb4.traineddata checksum mismatch: $actualHeb4Sha256" }
+          Copy-Item 'licenses/APACHE-2.0.txt' 'tesseract/tessdata/'
+          Copy-Item 'licenses/HEBREW-OCR-MODEL-NOTICE.txt' 'tesseract/tessdata/'
 
       - name: בדיקת מנוע OCR בעברית ובאנגלית
         shell: pwsh
@@ -58,15 +67,22 @@ jobs:
           import ספריית_המתכונים as app
 
           root = Path("tesseract").resolve()
-          for required in ("eng.traineddata", "heb.traineddata"):
+          minimum_sizes = {
+              "eng.traineddata": 100_000,
+              "heb.traineddata": 2_500_000,
+              "heb4.traineddata": 3_500_000,
+          }
+          for required, minimum_size in minimum_sizes.items():
               data_file = root / "tessdata" / required
-              minimum_size = 2_500_000 if required == "heb.traineddata" else 100_000
               if not data_file.exists() or data_file.stat().st_size < minimum_size:
                   raise SystemExit(f"Missing or invalid language data: {data_file}")
+          for notice in ("APACHE-2.0.txt", "HEBREW-OCR-MODEL-NOTICE.txt"):
+              if not (root / "tessdata" / notice).is_file():
+                  raise SystemExit(f"Missing bundled OCR model attribution: {notice}")
           if not app.configure_ocr():
               raise SystemExit("Tesseract was not found by the application")
           languages = set(app.pytesseract.get_languages())
-          if not {"eng", "heb"}.issubset(languages):
+          if not {"eng", "heb", "heb4"}.issubset(languages):
               raise SystemExit(f"Missing OCR languages: {languages}")
 
           image = Image.new("RGB", (900, 180), "white")
@@ -86,11 +102,17 @@ jobs:
               # Fallback for Pillow builds without the optional RTL layout engine.
               hebrew_draw.text((30, 35), hebrew_text[::-1], fill="black", font=font)
           recognized_hebrew = app.ocr_image(hebrew_image)
+          recognized_heb4 = app.pytesseract.image_to_string(
+              hebrew_image, lang="heb4+eng", config="--oem 3 --psm 6", timeout=35
+          )
           hebrew_image.close()
           hebrew_count = sum(1 for char in recognized_hebrew if "א" <= char <= "ת")
+          heb4_count = sum(1 for char in recognized_heb4 if "א" <= char <= "ת")
           if hebrew_count < 6:
               raise SystemExit(f"Hebrew OCR recognition failed. Output: {recognized_hebrew!r}")
-          print(f"OCR OK: English and Hebrew recognized ({hebrew_count} Hebrew letters).")
+          if heb4_count < 6:
+              raise SystemExit(f"Additional Hebrew OCR model failed. Output: {recognized_heb4!r}")
+          print(f"OCR OK: English, Hebrew and heb4 model recognized ({hebrew_count}/{heb4_count} Hebrew letters).")
           '@ | python -
 
       - name: בדיקת תקינות קוד ובדיקות יחידה

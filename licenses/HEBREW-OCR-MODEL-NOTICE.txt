@@ -1,0 +1,18 @@
+Hebrew OCR model attribution
+============================
+
+File: heb4.traineddata
+Upstream project: https://github.com/boro11204/hebrew-ocr-offline
+Pinned upstream revision: 30ae3e5513d5c132ecdfeb03730fa0b723a2180f
+Upstream file: models/heb4.traineddata
+SHA-256: a1422a71e9e7d060b5cc0c08e3060cc5e7a9a9ea41ecc0da43ec07d8946769a6
+
+This Tesseract LSTM model for printed Hebrew square script was fine-tuned from
+Google's tessdata_best Hebrew model and further trained by the upstream project.
+The upstream project identifies the model as licensed under the Apache License,
+Version 2.0. A copy of that license is distributed alongside this notice.
+
+The model is an optional local fallback for weak OCR results. It is bundled into
+the Windows application and is not downloaded by users or invoked through a
+remote service. The recipe application does not include the upstream Sefaria
+word lists or its domain-specific spelling corrector.

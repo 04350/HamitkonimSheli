@@ -223,9 +223,11 @@ def best_title_from_pdf_page(page) -> str:
         return ""
 
 
-def _recognize_attempt(image, pytesseract_module, psm: int) -> dict[str, Any] | None:
+def _recognize_attempt(
+    image, pytesseract_module, psm: int, language: str = "heb+eng"
+) -> dict[str, Any] | None:
     data = pytesseract_module.image_to_data(
-        image, lang="heb+eng", config=f"--oem 3 --psm {psm}",
+        image, lang=language, config=f"--oem 3 --psm {psm}",
         output_type=pytesseract_module.Output.DICT, timeout=35,
     )
     lines = lines_from_tesseract_data(data)
@@ -243,8 +245,20 @@ def _recognize_attempt(image, pytesseract_module, psm: int) -> dict[str, Any] | 
     }
 
 
-def recognize_image(image, pytesseract_module=None) -> dict[str, Any]:
-    """Recognize a scan and try alternate layouts/orientations only when the first result is weak."""
+def _safe_recognize_attempt(
+    image, pytesseract_module, psm: int, language: str = "heb+eng"
+) -> dict[str, Any] | None:
+    """A missing optional OCR model must not discard a valid primary result."""
+    try:
+        return _recognize_attempt(image, pytesseract_module, psm, language)
+    except Exception:
+        return None
+
+
+def recognize_image(
+    image, pytesseract_module=None, alternate_languages: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """Recognize recipe scans locally, retrying weak results with alternate layouts/models."""
     empty = {"text": "", "title": "", "lines": [], "confidence": 0.0}
     if pytesseract_module is None:
         try:
@@ -259,7 +273,7 @@ def recognize_image(image, pytesseract_module=None) -> dict[str, Any]:
     rotated_images = []
     try:
         enhanced, threshold = preprocess_image(image)
-        first = _recognize_attempt(enhanced, pytesseract_module, 6)
+        first = _safe_recognize_attempt(enhanced, pytesseract_module, 6)
         if first:
             attempts.append(first)
         first_text_length = len(re.sub(r"\s+", "", first["text"])) if first else 0
@@ -270,22 +284,61 @@ def recognize_image(image, pytesseract_module=None) -> dict[str, Any]:
             or not first["title"]
         )
         if retry_needed:
-            second = _recognize_attempt(enhanced, pytesseract_module, 11)
+            second = _safe_recognize_attempt(enhanced, pytesseract_module, 11)
             if second:
                 attempts.append(second)
-        if retry_needed and (not attempts or max(item["quality"] for item in attempts) < 120):
-            third = _recognize_attempt(threshold, pytesseract_module, 6)
-            if third:
-                attempts.append(third)
+
+            # PSM 3 asks Tesseract to detect the page layout. It is useful for
+            # cookbooks and recipe sheets with more than one text column.
+            current_best = max(attempts, key=lambda item: item["quality"]) if attempts else None
+            if current_best is None or current_best["confidence"] < 55 or not current_best["title"]:
+                page_layout = _safe_recognize_attempt(enhanced, pytesseract_module, 3)
+                if page_layout:
+                    attempts.append(page_layout)
+
+            current_best = max(attempts, key=lambda item: item["quality"]) if attempts else None
+            if current_best is None or current_best["quality"] < 120:
+                third = _safe_recognize_attempt(threshold, pytesseract_module, 6)
+                if third:
+                    attempts.append(third)
+
+            # The additional Hebrew model is optional and fully local. Only try
+            # it when the standard Tesseract Hebrew model still gives a weak result.
+            current_best = max(attempts, key=lambda item: item["quality"]) if attempts else None
+            current_text_length = (
+                len(re.sub(r"\s+", "", current_best["text"])) if current_best else 0
+            )
+            if (
+                current_best is None
+                or current_best["confidence"] < 55
+                or current_text_length < 18
+                or not current_best["title"]
+            ):
+                for language in dict.fromkeys(alternate_languages or ()):
+                    if not language or language == "heb+eng":
+                        continue
+                    alternate = _safe_recognize_attempt(
+                        enhanced, pytesseract_module, 6, language
+                    )
+                    if alternate:
+                        attempts.append(alternate)
+                    if alternate is not None and (
+                        alternate["confidence"] < 55 or not alternate["title"]
+                    ):
+                        alternate_layout = _safe_recognize_attempt(
+                            enhanced, pytesseract_module, 3, language
+                        )
+                        if alternate_layout:
+                            attempts.append(alternate_layout)
 
         best = max(attempts, key=lambda item: item["quality"]) if attempts else None
         best_text_length = len(re.sub(r"\s+", "", best["text"])) if best else 0
-        # Rotated photos/scans are expensive to retry, so test them only after weak upright OCR.
+        # Rotated photos/scans are expensive, so test them only after weak upright OCR.
         if best is None or best["confidence"] < 42 or best_text_length < 8:
             for angle in (90, 180, 270):
                 rotated = enhanced.rotate(angle, expand=True)
                 rotated_images.append(rotated)
-                candidate = _recognize_attempt(rotated, pytesseract_module, 6)
+                candidate = _safe_recognize_attempt(rotated, pytesseract_module, 6)
                 if candidate:
                     attempts.append(candidate)
                     best = max(attempts, key=lambda item: item["quality"])
@@ -296,9 +349,12 @@ def recognize_image(image, pytesseract_module=None) -> dict[str, Any]:
         if attempts:
             best = max(attempts, key=lambda item: item["quality"])
             return {key: best[key] for key in ("text", "title", "lines", "confidence")}
-        fallback = pytesseract_module.image_to_string(
-            enhanced, lang="heb+eng", config="--oem 3 --psm 6", timeout=35
-        )
+        try:
+            fallback = pytesseract_module.image_to_string(
+                enhanced, lang="heb+eng", config="--oem 3 --psm 6", timeout=35
+            )
+        except Exception:
+            fallback = ""
         return {"text": fallback or "", "title": "", "lines": [], "confidence": 0.0}
     except Exception:
         return empty

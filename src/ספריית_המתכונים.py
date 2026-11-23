@@ -61,7 +61,7 @@ except Exception:
     pytesseract = None
 
 APP_NAME = "ספריית המתכונים שלי"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 def _rounded_points(x1, y1, x2, y2, radius=14, steps=8):
     """Create a polygon outline with smooth rounded corners."""
     width = max(1, x2 - x1)
@@ -517,6 +517,18 @@ def configure_ocr():
             return True
     return False
 
+
+# Configure the bundled engine once at startup; all OCR remains on this computer.
+OCR_ENGINE_READY = configure_ocr()
+
+
+def _ocr_alternate_languages() -> tuple[str, ...]:
+    tessdata = os.environ.get("TESSDATA_PREFIX", "").strip()
+    if tessdata and (Path(tessdata) / "heb4.traineddata").is_file():
+        return ("heb4+eng",)
+    return ()
+
+
 OCR_TITLE_CACHE: dict[str, str] = {}
 OCR_FILE_CACHE: dict[str, dict] = {}
 _LAST_OCR_TITLE = ""
@@ -528,7 +540,7 @@ def ocr_image(image) -> str:
     _LAST_OCR_TITLE = ""
     if pytesseract is None:
         return ""
-    result = recognize_image(image, pytesseract)
+    result = recognize_image(image, pytesseract, alternate_languages=_ocr_alternate_languages())
     _LAST_OCR_TITLE = str(result.get("title") or "")
     return str(result.get("text") or "")
 
@@ -712,7 +724,7 @@ def choose_title(path: Path, content: str) -> str:
     if not visual_title and path.suffix.lower() in IMAGE_TYPES and Image is not None and pytesseract is not None:
         try:
             with Image.open(path) as image:
-                visual_title = str(recognize_image(image.convert("RGB"), pytesseract).get("title") or "")
+                visual_title = str(recognize_image(image.convert("RGB"), pytesseract, alternate_languages=_ocr_alternate_languages()).get("title") or "")
         except Exception:
             visual_title = ""
     if visual_title:
@@ -3619,7 +3631,7 @@ class App:
                                     if page_index == 0:
                                         preview_image = page_image.copy()
                                         title_candidate = best_title_from_pdf_page(page) or ""
-                                    result = recognize_image(page_image, pytesseract)
+                                    result = recognize_image(page_image, pytesseract, alternate_languages=_ocr_alternate_languages())
                                 if not page_text:
                                     page_text = result.get("text", "")
                                 if page_index == 0 and result.get("title"):
@@ -3630,7 +3642,7 @@ class App:
                     elif path.suffix.lower() in IMAGE_TYPES:
                         with Image.open(path) as source:
                             preview_image = ImageOps.exif_transpose(source).convert("RGB")
-                            result = recognize_image(preview_image, pytesseract)
+                            result = recognize_image(preview_image, pytesseract, alternate_languages=_ocr_alternate_languages())
                         title_candidate = result.get("title", "")
                         text_parts.append(result.get("text", ""))
                         if result.get("confidence"):
