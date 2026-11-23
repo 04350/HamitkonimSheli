@@ -7,7 +7,7 @@ TRAIN_DIR="${TRAIN_DIR:-$ROOT/data/recipe-ocr-training}"
 EVAL_DIR="${EVAL_DIR:-$ROOT/data/recipe-ocr-evaluation}"
 WORK="${WORK_DIR:-$ROOT/build/recipe-ocr-training}"
 ITERATIONS="${MAX_ITERATIONS:-10000}"
-REF="${TESSTRAIN_REF:-main}"
+REF="${TESSTRAIN_REF:-405346a3a67d8e4e049341d1da6a4b752e0b8351}"
 TESSDATA="$WORK/tessdata"
 TESSTRAIN="$WORK/tesstrain"
 for cmd in python3 make git curl sha256sum tesseract lstmtraining combine_tessdata wget; do
@@ -19,14 +19,10 @@ mkdir -p "$TESSDATA" "$WORK"
 if [[ ! -d "$TESSTRAIN/.git" ]]; then git clone https://github.com/tesseract-ocr/tesstrain.git "$TESSTRAIN"; fi
 git -C "$TESSTRAIN" fetch --depth 1 origin "$REF"
 git -C "$TESSTRAIN" checkout --detach FETCH_HEAD
-curl -fL --retry 3 https://github.com/tesseract-ocr/tessdata_best/raw/main/heb.traineddata -o "$TESSDATA/heb.traineddata"
+curl -fL --retry 3 https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/heb.traineddata -o "$TESSDATA/heb.traineddata"
 curl -fL --retry 3 https://raw.githubusercontent.com/boro11204/hebrew-ocr-offline/30ae3e5513d5c132ecdfeb03730fa0b723a2180f/models/heb4.traineddata -o "$TESSDATA/heb4.traineddata"
 printf '%s  %s\n' 'a1422a71e9e7d060b5cc0c08e3060cc5e7a9a9ea41ecc0da43ec07d8946769a6' "$TESSDATA/heb4.traineddata" | sha256sum --check --status || { echo "heb4 checksum verification failed" >&2; exit 3; }
-if [[ -f /usr/share/tesseract-ocr/5/tessdata/eng.traineddata ]]; then
-  cp /usr/share/tesseract-ocr/5/tessdata/eng.traineddata "$TESSDATA/eng.traineddata"
-else
-  curl -fL --retry 3 https://github.com/tesseract-ocr/tessdata_best/raw/main/eng.traineddata -o "$TESSDATA/eng.traineddata"
-fi
+curl -fL --retry 3 https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/eng.traineddata -o "$TESSDATA/eng.traineddata"
 export TESSDATA_PREFIX="$TESSDATA"
 train_candidate() {
   local base="$1" name="$2" data="$WORK/data" output="$WORK/data/$2"
