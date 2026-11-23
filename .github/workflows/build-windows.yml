@@ -83,11 +83,11 @@ jobs:
                   raise SystemExit(f"Missing bundled OCR model attribution: {notice}")
           if not app.configure_ocr():
               raise SystemExit("Tesseract was not found by the application")
-          expected_tessdata = root / "tessdata"
-          configured_tessdata = Path(app.os.environ.get("TESSDATA_PREFIX", "")).resolve()
-          if configured_tessdata != expected_tessdata.resolve():
+          expected_tessdata_prefix = root.resolve()
+          configured_tessdata_prefix = Path(app.os.environ.get("TESSDATA_PREFIX", "")).resolve()
+          if configured_tessdata_prefix != expected_tessdata_prefix:
               raise SystemExit(
-                  f"Wrong TESSDATA_PREFIX: {configured_tessdata}; expected {expected_tessdata}"
+                  f"Wrong TESSDATA_PREFIX: {configured_tessdata_prefix}; expected {expected_tessdata_prefix}"
               )
           languages = set(app.pytesseract.get_languages())
           if not {"eng", "heb", "heb4"}.issubset(languages):
