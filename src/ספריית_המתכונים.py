@@ -513,9 +513,9 @@ def configure_ocr():
             pytesseract.pytesseract.tesseract_cmd = str(candidate)
             tessdata = candidate.parent / "tessdata"
             if tessdata.exists():
-                # Tesseract's TESSDATA_PREFIX points directly to the tessdata
-                # directory. Point at the bundled folder so all models are found.
-                os.environ["TESSDATA_PREFIX"] = str(tessdata)
+                # Tesseract expects TESSDATA_PREFIX to point to the parent
+                # directory containing the tessdata folder.
+                os.environ["TESSDATA_PREFIX"] = str(candidate.parent)
             return True
     return False
 
