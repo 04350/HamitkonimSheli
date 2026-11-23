@@ -227,7 +227,7 @@ def _tesseract_config(psm: int, tessdata_dir=None) -> str:
     """Build an OCR config with an explicit local tessdata parent when available."""
     prefix = ""
     if tessdata_dir:
-        escaped = str(tessdata_dir).replace('"', r'\"')
+        escaped = str(tessdata_dir).replace("\\", "/").replace('"', "")
         prefix = f'--tessdata-dir "{escaped}" '
     return f"{prefix}--oem 3 --psm {psm}"
 
