@@ -63,6 +63,11 @@ jobs:
           Copy-Item 'licenses/APACHE-2.0.txt' 'tesseract/tessdata/'
           Copy-Item 'licenses/HEBREW-OCR-MODEL-NOTICE.txt' 'tesseract/tessdata/'
 
+      - name: בדיקת תקינות קוד ובדיקות יחידה
+        run: |
+          python -m py_compile "src/ספריית_המתכונים.py"
+          python -m unittest discover -s tests -v
+
       - name: בדיקת מנוע OCR בעברית ובאנגלית
         shell: pwsh
         run: |
@@ -157,11 +162,6 @@ jobs:
               raise SystemExit(f"Additional Hebrew OCR model failed. Output: {recognized_heb4!r}")
           print(f"OCR OK: English, Hebrew and heb4 model recognized ({hebrew_count}/{heb4_count} Hebrew letters).")
           '@ | python -
-
-      - name: בדיקת תקינות קוד ובדיקות יחידה
-        run: |
-          python -m py_compile "src/ספריית_המתכונים.py"
-          python -m unittest discover -s tests -v
 
       - name: יצירת סמל התוכנה
         shell: pwsh
