@@ -227,7 +227,7 @@ def _recognize_attempt(
     image, pytesseract_module, psm: int, language: str = "heb+eng"
 ) -> dict[str, Any] | None:
     data = pytesseract_module.image_to_data(
-        image, lang=language, config=f"--oem 3 --psm {psm}",
+        image, lang=language, config=f"--oem 1 --psm {psm}",
         output_type=pytesseract_module.Output.DICT, timeout=35,
     )
     lines = lines_from_tesseract_data(data)
@@ -351,7 +351,7 @@ def recognize_image(
             return {key: best[key] for key in ("text", "title", "lines", "confidence")}
         try:
             fallback = pytesseract_module.image_to_string(
-                enhanced, lang="heb+eng", config="--oem 3 --psm 6", timeout=35
+                enhanced, lang="heb+eng", config="--oem 1 --psm 6", timeout=35
             )
         except Exception:
             fallback = ""

@@ -111,7 +111,10 @@ jobs:
           font_path = Path(r"C:\Windows\Fonts\arial.ttf")
           font = ImageFont.truetype(str(font_path), 64) if font_path.exists() else ImageFont.load_default()
           draw.text((30, 35), "APPLE RECIPE", fill="black", font=font)
-          tessdata_config = f'--tessdata-dir "{tessdata_dir.as_posix()}" --oem 1 --psm 6'
+          # configure_ocr sets TESSDATA_PREFIX to the directory containing tessdata.
+          # Keep Tesseract options free of embedded quotes; Windows would treat
+          # the quotes as part of the tessdata path when passed by pytesseract.
+          tessdata_config = "--oem 1 --psm 6"
           recognized = app.pytesseract.image_to_string(
               image, lang="eng", config=tessdata_config, timeout=35
           ).upper()

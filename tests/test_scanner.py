@@ -84,6 +84,7 @@ class RecipeScannerTests(unittest.TestCase):
         finally:
             image.close()
         self.assertIn("APPLE", result["text"])
+        self.assertIn("--oem 1", fake.image_to_data.call_args.kwargs["config"])
         self.assertEqual(fake.image_to_data.call_count, 1)
 
     def test_low_confidence_first_pass_runs_one_retry(self):
