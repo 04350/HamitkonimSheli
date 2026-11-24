@@ -937,6 +937,29 @@ class בדיקותספרייה(unittest.TestCase):
             else:
                 os.environ["LOCALAPPDATA"] = previous
 
+
+    def test_זיהוי_מודל_heb4_תומך_בנתיב_TESSDATA_PREFIX_ובנתיב_ישיר(self):
+        previous = os.environ.get("TESSDATA_PREFIX")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                nested = root / "tessdata"
+                nested.mkdir()
+                (nested / "heb4.traineddata").write_bytes(b"model")
+                os.environ["TESSDATA_PREFIX"] = str(root)
+                self.assertEqual(app._ocr_alternate_languages(), ("heb4+eng",))
+
+                os.environ["TESSDATA_PREFIX"] = str(nested)
+                self.assertEqual(app._ocr_alternate_languages(), ("heb4+eng",))
+
+                os.environ["TESSDATA_PREFIX"] = str(root / "missing")
+                self.assertEqual(app._ocr_alternate_languages(), ())
+        finally:
+            if previous is None:
+                os.environ.pop("TESSDATA_PREFIX", None)
+            else:
+                os.environ["TESSDATA_PREFIX"] = previous
+
     def test_גרסת_schema_מתועדת_במסד_הנתונים(self):
         previous = os.environ.get("LOCALAPPDATA")
         try:

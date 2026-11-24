@@ -525,10 +525,15 @@ OCR_ENGINE_READY = configure_ocr()
 
 
 def _ocr_alternate_languages() -> tuple[str, ...]:
-    tessdata = os.environ.get("TESSDATA_PREFIX", "").strip()
-    if tessdata and (Path(tessdata) / "heb4.traineddata").is_file():
-        return ("heb4+eng",)
-    return ()
+    tessdata_prefix = os.environ.get("TESSDATA_PREFIX", "").strip()
+    if not tessdata_prefix:
+        return ()
+    root = Path(tessdata_prefix)
+    candidates = (
+        root / "tessdata" / "heb4.traineddata",
+        root / "heb4.traineddata",
+    )
+    return ("heb4+eng",) if any(path.is_file() for path in candidates) else ()
 
 
 OCR_TITLE_CACHE: dict[str, str] = {}

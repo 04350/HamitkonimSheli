@@ -111,9 +111,15 @@ jobs:
           font_path = Path(r"C:\Windows\Fonts\arial.ttf")
           font = ImageFont.truetype(str(font_path), 64) if font_path.exists() else ImageFont.load_default()
           draw.text((30, 35), "APPLE RECIPE", fill="black", font=font)
-          recognized = app.ocr_image(image).upper()
+          tessdata_config = f'--tessdata-dir "{tessdata_dir.as_posix()}" --oem 1 --psm 6'
+          recognized = app.pytesseract.image_to_string(
+              image, lang="eng", config=tessdata_config, timeout=35
+          ).upper()
+          wrapped = app.ocr_image(image).upper()
+          print(f"Direct English OCR: {recognized!r}")
+          print(f"Application OCR wrapper: {wrapped!r}")
           if "APPLE" not in recognized:
-              raise SystemExit(f"OCR recognition failed. Output: {recognized!r}")
+              raise SystemExit(f"Direct English OCR recognition failed. Output: {recognized!r}")
           hebrew_image = Image.new("RGB", (1200, 220), "white")
           hebrew_draw = ImageDraw.Draw(hebrew_image)
           hebrew_text = "עוגת תפוחים"
@@ -122,11 +128,15 @@ jobs:
           except (TypeError, ValueError, KeyError):
               # Fallback for Pillow builds without the optional RTL layout engine.
               hebrew_draw.text((30, 35), hebrew_text[::-1], fill="black", font=font)
-          recognized_hebrew = app.ocr_image(hebrew_image)
+          recognized_hebrew = app.pytesseract.image_to_string(
+              hebrew_image, lang="heb+eng", config=tessdata_config, timeout=35
+          )
+          print(f"Direct Hebrew OCR: {recognized_hebrew!r}")
+          print(f"Application Hebrew OCR wrapper: {app.ocr_image(hebrew_image)!r}")
           try:
               recognized_heb4 = app.pytesseract.image_to_string(
                   hebrew_image, lang="heb4+eng",
-                  config=f'--tessdata-dir "{tessdata_dir.as_posix()}" --oem 1 --psm 6',
+                  config=tessdata_config,
                   timeout=35
               )
           except app.pytesseract.TesseractError as exc:
