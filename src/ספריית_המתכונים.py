@@ -1923,6 +1923,7 @@ class App:
             },
         }
         self.colors = dict(palettes.get(theme, palettes["יוקרה"]))
+        self.colors.setdefault("hero", self.colors.get("navy", "#142F26"))
         try:
             font_size = max(9, min(15, int(self.library.get_setting("font_size", "11"))))
         except (ValueError, TypeError):

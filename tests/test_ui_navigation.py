@@ -52,6 +52,7 @@ class InAppNavigationTests(unittest.TestCase):
         self.assertIn('self.library.get_setting("color_theme", "יוקרה")', source)
         self.assertIn('font=("Segoe UI", 30, "bold")', source)
         self.assertIn('surface=c["hero"]', source)
+        self.assertIn('self.colors.setdefault("hero", self.colors.get("navy", "#142F26"))', source)
         self.assertIn('bg=c["hero"], fg="#FFFDF8"', source)
         self.assertIn('bg=c["accent"], width=4', source)
 
