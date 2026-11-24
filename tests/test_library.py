@@ -640,6 +640,410 @@ class בדיקותספרייה(unittest.TestCase):
             else:
                 os.environ["LOCALAPPDATA"] = previous
 
+
+    def test_גיבוי_ושחזור_בין_פרופילי_windows_שומר_תיקיות_ומטאדטה(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                profile_a = Path(temp) / "profile-a"
+                profile_b = Path(temp) / "profile-b"
+                source_dir = Path(temp) / "מקור" / "קינוחים"
+                source_dir.mkdir(parents=True)
+                source = source_dir / "עוגת תפוחים.txt"
+                source.write_text("עוגת תפוחים\nמצרכים:\nתפוחים, קמח\nאופן ההכנה:\nמערבבים ואופים", encoding="utf-8")
+
+                os.environ["LOCALAPPDATA"] = str(profile_a)
+                original = app.RecipeLibrary()
+                added, _ = original.import_one(source, relative_folder="חגים/שבת/קינוחים")
+                self.assertTrue(added)
+                item_id = int(original.rows()[0]["id"])
+                collection_id = original.create_collection("מתכוני שבת")
+                original.set_item_collection(item_id, collection_id, True)
+                original.set_favorite(item_id, True)
+                original.set_item_tags(item_id, ["משפחה", "קינוחים"])
+                original.set_recipe_data(item_id, {
+                    "ingredients": "תפוחים, קמח",
+                    "instructions": "מערבבים ואופים",
+                    "category": "קינוחים",
+                    "is_recipe": True,
+                })
+                cover = original.files_dir / "תמונות מתכונים" / "cover.png"
+                cover.parent.mkdir(parents=True, exist_ok=True)
+                cover.write_bytes(b"fake-png-for-backup-test")
+                recipe_data = original.get_recipe_data(item_id)
+                recipe_data["image_path"] = str(cover)
+                original.set_recipe_data(item_id, recipe_data)
+                original.set_setting("color_theme", "יוקרה")
+                original.set_setting("font_size", "12")
+                backup = Path(temp) / "העברה.zip"
+                original.create_backup(backup)
+                original.db.close()
+
+                os.environ["LOCALAPPDATA"] = str(profile_b)
+                restored_library = app.RecipeLibrary()
+                self.assertEqual(restored_library.rows(), [])
+                count = restored_library.restore_backup(backup)
+                self.assertEqual(count, 1)
+
+                restored = restored_library.rows()[0]
+                expected_path = profile_b / app.APP_NAME / "הקבצים שלי" / "חגים" / "שבת" / "קינוחים" / source.name
+                self.assertEqual(Path(restored["stored_path"]), expected_path)
+                self.assertTrue(expected_path.is_file())
+                self.assertEqual(expected_path.read_text(encoding="utf-8"), source.read_text(encoding="utf-8"))
+                self.assertEqual(restored_library.item_collection_names(item_id), ["מתכוני שבת"])
+                self.assertEqual(set(restored_library.tag_names(item_id)), {"משפחה", "קינוחים"})
+                restored_recipe = restored_library.get_recipe_data(item_id)
+                self.assertEqual(restored_recipe["ingredients"], "תפוחים, קמח")
+                expected_cover = profile_b / app.APP_NAME / "הקבצים שלי" / "תמונות מתכונים" / "cover.png"
+                self.assertEqual(Path(restored_recipe["image_path"]), expected_cover)
+                self.assertEqual(expected_cover.read_bytes(), b"fake-png-for-backup-test")
+                self.assertEqual(restored_library.get_setting("color_theme"), "יוקרה")
+                self.assertEqual(restored_library.get_setting("font_size"), "12")
+                restored_library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+
+
+    def test_גיבוי_עם_תמונת_מתכון_חסרה_נכשל_בלי_להחליף_גיבוי_קיים(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "recipe.txt"
+                source.write_text("תוכן מתכון", encoding="utf-8")
+                library = app.RecipeLibrary()
+                self.assertTrue(library.import_one(source)[0])
+                item_id = int(library.rows()[0]["id"])
+                image = library.files_dir / "תמונות מתכונים" / "missing.png"
+                image.parent.mkdir(parents=True, exist_ok=True)
+                image.write_bytes(b"fake-image")
+                library.set_recipe_data(item_id, {"image_path": str(image)})
+                image.unlink()
+
+                backup = Path(temp) / "backup.zip"
+                existing_backup = b"previous-valid-backup-must-survive"
+                backup.write_bytes(existing_backup)
+                with self.assertRaises(ValueError):
+                    library.create_backup(backup)
+                self.assertEqual(backup.read_bytes(), existing_backup)
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_גיבוי_עם_קובץ_חסר_נכשל_בלי_להחליף_גיבוי_קיים(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "missing-recipe.txt"
+                source.write_text("תוכן מתכון", encoding="utf-8")
+                library = app.RecipeLibrary()
+                self.assertTrue(library.import_one(source)[0])
+                stored_file = Path(library.rows()[0]["stored_path"])
+                stored_file.unlink()
+
+                backup = Path(temp) / "backup.zip"
+                existing_backup = b"previous-valid-backup-must-survive"
+                backup.write_bytes(existing_backup)
+                with self.assertRaises(ValueError):
+                    library.create_backup(backup)
+                self.assertEqual(backup.read_bytes(), existing_backup)
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_גיבוי_מכיל_manifest_ואימות_קבצים(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "recipe.txt"
+                source.write_text("מתכון", encoding="utf-8")
+                library = app.RecipeLibrary()
+                self.assertTrue(library.import_one(source)[0])
+                backup = Path(temp) / "backup.zip"
+                library.create_backup(backup)
+                with app.zipfile.ZipFile(backup, "r") as archive:
+                    manifest = app.json.loads(archive.read("manifest.json").decode("utf-8"))
+                    self.assertEqual(manifest["format"], "hamitkonim-sheli-backup")
+                    self.assertEqual(manifest["format_version"], 2)
+                    self.assertEqual(len(manifest["files"]), 1)
+                    self.assertEqual(len(manifest["items"]), 1)
+                    self.assertEqual(manifest["files"][0]["sha256"], app._sha256_file(
+                        library.files_dir / manifest["files"][0]["path"]
+                    ))
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_גיבוי_פגום_או_נתיב_זדוני_אינם_משנים_את_הספרייה(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "safe.txt"
+                source.write_text("תוכן מקורי", encoding="utf-8")
+                library = app.RecipeLibrary()
+                self.assertTrue(library.import_one(source)[0])
+                original_path = Path(library.rows()[0]["stored_path"])
+                original_bytes = original_path.read_bytes()
+
+                corrupt = Path(temp) / "corrupt.zip"
+                corrupt.write_bytes(b"not a zip archive")
+                with self.assertRaises(ValueError):
+                    library.restore_backup(corrupt)
+
+                traversal = Path(temp) / "traversal.zip"
+                with app.zipfile.ZipFile(traversal, "w") as archive:
+                    archive.writestr("הספרייה.sqlite3", b"not a database")
+                    archive.writestr("הקבצים שלי/../../outside.txt", b"bad")
+                with self.assertRaises(ValueError):
+                    library.restore_backup(traversal)
+
+                self.assertEqual(len(library.rows()), 1)
+                self.assertEqual(original_path.read_bytes(), original_bytes)
+                self.assertFalse((Path(temp) / "outside.txt").exists())
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_כשל_במהלך_החלפת_גיבוי_מחזיר_את_הספרייה_הקודמת(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "first.txt"
+                source.write_text("גרסה מקורית", encoding="utf-8")
+                library = app.RecipeLibrary()
+                self.assertTrue(library.import_one(source)[0])
+                backup = Path(temp) / "backup.zip"
+                library.create_backup(backup)
+                second = Path(temp) / "second.txt"
+                second.write_text("תוכן שנוסף אחרי הגיבוי", encoding="utf-8")
+                self.assertTrue(library.import_one(second)[0])
+                before = {row["title"] for row in library.rows()}
+                original_replace = app.os.replace
+
+                # Fail before any move, after the files directory moved, and
+                # after the new files directory was installed but before the DB.
+                for failure_call in (1, 2, 4):
+                    calls = {"count": 0}
+
+                    def fail_at_selected_replace(src, dst):
+                        calls["count"] += 1
+                        if calls["count"] == failure_call:
+                            raise OSError("simulated replacement failure")
+                        return original_replace(src, dst)
+
+                    with patch.object(app.os, "replace", side_effect=fail_at_selected_replace):
+                        with self.assertRaises(OSError):
+                            library.restore_backup(backup)
+
+                    self.assertEqual({row["title"] for row in library.rows()}, before)
+                    for row in library.rows():
+                        self.assertTrue(Path(row["stored_path"]).is_file())
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+
+
+    def test_שחזור_גיבוי_ישן_ללא_manifest_שומר_תיקיות_מקוננות(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                profile_a = Path(temp) / "profile-a"
+                profile_b = Path(temp) / "profile-b"
+                os.environ["LOCALAPPDATA"] = str(profile_a)
+                source = Path(temp) / "recipe.txt"
+                source.write_text("מתכון ישן", encoding="utf-8")
+                original = app.RecipeLibrary()
+                self.assertTrue(original.import_one(source, relative_folder="מתכונים/שבת")[0])
+                stored = Path(original.rows()[0]["stored_path"])
+                old_style_path = (
+                    "C:\\Users\\old-user\\AppData\\Local\\ספריית המתכונים שלי\\הקבצים שלי\\מתכונים\\שבת\\"
+                    + stored.name
+                )
+                db_copy = Path(temp) / "old-library.sqlite3"
+                backup_db = app.sqlite3.connect(db_copy)
+                original.db.backup(backup_db)
+                backup_db.execute("UPDATE items SET stored_path=?", (old_style_path,))
+                backup_db.commit()
+                backup_db.close()
+
+                legacy = Path(temp) / "legacy.zip"
+                with app.zipfile.ZipFile(legacy, "w", app.zipfile.ZIP_DEFLATED) as archive:
+                    archive.write(db_copy, "הספרייה.sqlite3")
+                    archive.writestr("הקבצים שלי/מתכונים/", b"")
+                    for path in original.files_dir.rglob("*"):
+                        if path.is_file():
+                            archive.write(path, "הקבצים שלי/" + path.relative_to(original.files_dir).as_posix())
+                original.db.close()
+
+                os.environ["LOCALAPPDATA"] = str(profile_b)
+                restored_library = app.RecipeLibrary()
+                self.assertEqual(restored_library.restore_backup(legacy), 1)
+                restored_path = Path(restored_library.rows()[0]["stored_path"])
+                self.assertEqual(
+                    restored_path,
+                    profile_b / app.APP_NAME / "הקבצים שלי" / "מתכונים" / "שבת" / stored.name
+                )
+                self.assertEqual(restored_path.read_text(encoding="utf-8"), "מתכון ישן")
+                restored_library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+    def test_שחזור_מזהה_שינוי_בתוכן_קובץ_לפי_hash_ומשאיר_את_הספרייה(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "recipe.txt"
+                source.write_text("תוכן מקורי", encoding="utf-8")
+                library = app.RecipeLibrary()
+                self.assertTrue(library.import_one(source)[0])
+                backup = Path(temp) / "backup.zip"
+                library.create_backup(backup)
+                current_row = library.rows()[0]
+                current_file = Path(current_row["stored_path"])
+                original_data = current_file.read_bytes()
+
+                tampered = Path(temp) / "tampered.zip"
+                with app.zipfile.ZipFile(backup, "r") as original_archive:
+                    with app.zipfile.ZipFile(tampered, "w", app.zipfile.ZIP_DEFLATED) as altered_archive:
+                        for info in original_archive.infolist():
+                            payload = original_archive.read(info.filename)
+                            if info.filename.startswith("הקבצים שלי/"):
+                                payload = b"tampered-content"
+                            altered_archive.writestr(info, payload)
+
+                with self.assertRaises(ValueError):
+                    library.restore_backup(tampered)
+                self.assertEqual(len(library.rows()), 1)
+                self.assertEqual(current_file.read_bytes(), original_data)
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+
+    def test_שדרוג_מסד_נתונים_ישן_לגרסת_schema_שומר_נתונים(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "old-recipe.txt"
+                source.write_text("מתכון קיים", encoding="utf-8")
+                old_library = app.RecipeLibrary()
+                self.assertTrue(old_library.import_one(source)[0])
+                old_library.db.execute("PRAGMA user_version = 0")
+                old_library.db.commit()
+                old_library.db.close()
+
+                upgraded = app.RecipeLibrary()
+                self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 1)
+                self.assertEqual(len(upgraded.rows()), 1)
+                restored_path = Path(upgraded.rows()[0]["stored_path"])
+                self.assertTrue(restored_path.is_file())
+                self.assertEqual(restored_path.read_text(encoding="utf-8"), "מתכון קיים")
+                upgraded.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
+
+
+    def test_configure_ocr_sets_TESSDATA_PREFIX_to_the_language_data_folder(self):
+        previous_prefix = os.environ.get("TESSDATA_PREFIX")
+        previous_meipass = getattr(app.sys, "_MEIPASS", None)
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                engine = root / "tesseract"
+                tessdata = engine / "tessdata"
+                tessdata.mkdir(parents=True)
+                executable = engine / "tesseract.exe"
+                executable.write_bytes(b"test-engine")
+                fake = type("FakePytesseract", (), {})()
+                fake.pytesseract = type("PytesseractModule", (), {"tesseract_cmd": ""})()
+                with patch.object(app.sys, "_MEIPASS", str(root), create=True):
+                    with patch.object(app, "pytesseract", fake):
+                        self.assertTrue(app.configure_ocr())
+                self.assertEqual(Path(os.environ["TESSDATA_PREFIX"]), tessdata.resolve())
+                self.assertEqual(fake.pytesseract.tesseract_cmd, str(executable))
+        finally:
+            if previous_prefix is None:
+                os.environ.pop("TESSDATA_PREFIX", None)
+            else:
+                os.environ["TESSDATA_PREFIX"] = previous_prefix
+            if previous_meipass is None:
+                if hasattr(app.sys, "_MEIPASS"):
+                    delattr(app.sys, "_MEIPASS")
+            else:
+                app.sys._MEIPASS = previous_meipass
+
+    def test_זיהוי_מודל_heb4_תומך_בנתיב_TESSDATA_PREFIX_ובנתיב_ישיר(self):
+        previous = os.environ.get("TESSDATA_PREFIX")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                nested = root / "tessdata"
+                nested.mkdir()
+                (nested / "heb4.traineddata").write_bytes(b"model")
+                os.environ["TESSDATA_PREFIX"] = str(root)
+                self.assertEqual(app._ocr_alternate_languages(), ("heb4+eng",))
+
+                os.environ["TESSDATA_PREFIX"] = str(nested)
+                self.assertEqual(app._ocr_alternate_languages(), ("heb4+eng",))
+
+                os.environ["TESSDATA_PREFIX"] = str(root / "missing")
+                self.assertEqual(app._ocr_alternate_languages(), ())
+        finally:
+            if previous is None:
+                os.environ.pop("TESSDATA_PREFIX", None)
+            else:
+                os.environ["TESSDATA_PREFIX"] = previous
+
+    def test_גרסת_schema_מתועדת_במסד_הנתונים(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = temp
+                library = app.RecipeLibrary()
+                self.assertEqual(library.db.execute("PRAGMA user_version").fetchone()[0], 1)
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
+
     def test_בדיקת_דמיון_תוכן_לזיהוי_כפילויות(self):
         first = "עוגת תפוחים עם קינמון: קמח, ביצים, תפוחים וסוכר. אופים בתנור."
         second = "עוגת תפוחים קינמון: מערבבים קמח, ביצים, תפוחים וסוכר ואופים בתנור."

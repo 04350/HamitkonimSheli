@@ -1,6 +1,14 @@
 name: בניית התוכנה למחשב
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - '.github/workflows/build-windows.yml'
+      - 'tests/**'
+      - 'assets/**'
+      - 'scripts/**'
   push:
     branches: [main]
     paths:
@@ -55,14 +63,24 @@ jobs:
           Copy-Item 'licenses/APACHE-2.0.txt' 'tesseract/tessdata/'
           Copy-Item 'licenses/HEBREW-OCR-MODEL-NOTICE.txt' 'tesseract/tessdata/'
 
+      - name: בדיקת תקינות קוד ובדיקות יחידה
+        run: |
+          python -m py_compile "src/ספריית_המתכונים.py"
+          python -m unittest discover -s tests -v
+
       - name: בדיקת מנוע OCR בעברית ובאנגלית
         shell: pwsh
         run: |
           @'
           import sys
+          if hasattr(sys.stdout, "reconfigure"):
+              sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          if hasattr(sys.stderr, "reconfigure"):
+              sys.stderr.reconfigure(encoding="utf-8", errors="replace")
           from pathlib import Path
           from PIL import Image, ImageDraw, ImageFont
 
+          import subprocess
           sys.path.insert(0, "src")
           import ספריית_המתכונים as app
 
@@ -81,19 +99,39 @@ jobs:
                   raise SystemExit(f"Missing bundled OCR model attribution: {notice}")
           if not app.configure_ocr():
               raise SystemExit("Tesseract was not found by the application")
-          languages = set(app.pytesseract.get_languages())
-          if not {"eng", "heb", "heb4"}.issubset(languages):
-              raise SystemExit(f"Missing OCR languages from bundled tessdata: {languages}")
-          print(f"Tesseract bundled languages: {sorted(languages)}")
+          tessdata_dir = (root / "tessdata").resolve()
+          # Tesseract's language list can contain paths rather than bare names
+          # on Windows. Probe the binary and then load each model with real OCR.
+          listed = subprocess.run(
+              [app.pytesseract.pytesseract.tesseract_cmd, "--list-langs",
+               "--tessdata-dir", tessdata_dir.as_posix()],
+              capture_output=True, text=True, timeout=20
+          )
+          print("Tesseract --list-langs stdout:")
+          print(listed.stdout)
+          if listed.stderr.strip():
+              print("Tesseract --list-langs stderr:")
+              print(listed.stderr)
+          if listed.returncode:
+              raise SystemExit(f"Tesseract --list-langs failed: {listed.returncode}")
 
           image = Image.new("RGB", (900, 180), "white")
           draw = ImageDraw.Draw(image)
           font_path = Path(r"C:\Windows\Fonts\arial.ttf")
           font = ImageFont.truetype(str(font_path), 64) if font_path.exists() else ImageFont.load_default()
           draw.text((30, 35), "APPLE RECIPE", fill="black", font=font)
-          recognized = app.ocr_image(image).upper()
+          # configure_ocr sets TESSDATA_PREFIX to the directory containing tessdata.
+          # Keep Tesseract options free of embedded quotes; Windows would treat
+          # the quotes as part of the tessdata path when passed by pytesseract.
+          tessdata_config = "--oem 1 --psm 6"
+          recognized = app.pytesseract.image_to_string(
+              image, lang="eng", config=tessdata_config, timeout=35
+          ).upper()
+          wrapped = app.ocr_image(image).upper()
+          print(f"Direct English OCR: {recognized!r}")
+          print(f"Application OCR wrapper: {wrapped!r}")
           if "APPLE" not in recognized:
-              raise SystemExit(f"OCR recognition failed. Output: {recognized!r}")
+              raise SystemExit(f"Direct English OCR recognition failed. Output: {recognized!r}")
           hebrew_image = Image.new("RGB", (1200, 220), "white")
           hebrew_draw = ImageDraw.Draw(hebrew_image)
           hebrew_text = "עוגת תפוחים"
@@ -102,11 +140,24 @@ jobs:
           except (TypeError, ValueError, KeyError):
               # Fallback for Pillow builds without the optional RTL layout engine.
               hebrew_draw.text((30, 35), hebrew_text[::-1], fill="black", font=font)
-          recognized_hebrew = app.ocr_image(hebrew_image)
-          recognized_heb4 = app.pytesseract.image_to_string(
-              hebrew_image, lang="heb4+eng", config="--oem 3 --psm 6", timeout=35
+          recognized_hebrew = app.pytesseract.image_to_string(
+              hebrew_image, lang="heb+eng", config=tessdata_config, timeout=35
           )
-          hebrew_image.close()
+          print(f"Direct Hebrew OCR: {recognized_hebrew!r}")
+          print(f"Application Hebrew OCR wrapper: {app.ocr_image(hebrew_image)!r}")
+          try:
+              recognized_heb4 = app.pytesseract.image_to_string(
+                  hebrew_image, lang="heb4+eng",
+                  config=tessdata_config,
+                  timeout=35
+              )
+          except app.pytesseract.TesseractError as exc:
+              raise SystemExit(
+                  "Tesseract could not load/use heb4.traineddata. "
+                  f"Exit status: {exc.status}; details: {exc.message}"
+              ) from exc
+          finally:
+              hebrew_image.close()
           hebrew_count = sum(1 for char in recognized_hebrew if "א" <= char <= "ת")
           heb4_count = sum(1 for char in recognized_heb4 if "א" <= char <= "ת")
           if hebrew_count < 6:
@@ -115,11 +166,6 @@ jobs:
               raise SystemExit(f"Additional Hebrew OCR model failed. Output: {recognized_heb4!r}")
           print(f"OCR OK: English, Hebrew and heb4 model recognized ({hebrew_count}/{heb4_count} Hebrew letters).")
           '@ | python -
-
-      - name: בדיקת תקינות קוד ובדיקות יחידה
-        run: |
-          python -m py_compile "src/ספריית_המתכונים.py"
-          python -m unittest discover -s tests -v
 
       - name: יצירת סמל התוכנה
         shell: pwsh
