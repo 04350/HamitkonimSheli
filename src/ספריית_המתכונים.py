@@ -612,7 +612,7 @@ def _validated_backup_relative_path(value) -> str:
     if not raw or raw.startswith("/") or "\x00" in raw:
         raise ValueError("הגיבוי מכיל נתיב קובץ שאינו בטוח.")
     parts = raw.split("/")
-    if any(part in ("", ".", "..") for part in parts) or ":" in parts[0]:
+    if any(part in ("", ".", "..") or ":" in part for part in parts):
         raise ValueError("הגיבוי מכיל נתיב קובץ שאינו בטוח.")
     return PurePosixPath(*parts).as_posix()
 
@@ -1244,13 +1244,27 @@ class RecipeLibrary:
                 included_paths.add(relative.casefold())
 
             item_manifest = []
-            for row in self.db.execute("SELECT id, stored_path FROM items ORDER BY id").fetchall():
+            for row in self.db.execute(
+                "SELECT id, stored_path, recipe_data FROM items ORDER BY id"
+            ).fetchall():
                 relative = _backup_relative_path(row["stored_path"], self.files_dir)
                 if not relative or relative.casefold() not in included_paths:
                     raise ValueError(
                         f"הפריט {row['id']} מפנה לקובץ חסר או מחוץ לתיקיית הספרייה. "
                         "הגיבוי בוטל כדי לא ליצור גיבוי חלקי."
                     )
+                try:
+                    recipe_data = json.loads(row["recipe_data"] or "{}")
+                except (TypeError, ValueError):
+                    recipe_data = {}
+                image_path = recipe_data.get("image_path") if isinstance(recipe_data, dict) else ""
+                if image_path:
+                    image_relative = _backup_relative_path(image_path, self.files_dir)
+                    if not image_relative or image_relative.casefold() not in included_paths:
+                        raise ValueError(
+                            f"תמונת המתכון של הפריט {row['id']} חסרה או נמצאת מחוץ לספרייה. "
+                            "הגיבוי בוטל כדי למנוע אובדן של תמונות."
+                        )
                 item_manifest.append({"id": int(row["id"]), "path": relative})
 
             manifest = {
@@ -1472,10 +1486,11 @@ class RecipeLibrary:
                     if item_id in item_paths:
                         raise ValueError("רשימת פריטי הספרייה בגיבוי מכילה כפילויות.")
                     relative = entry.get("path")
-                    if relative is not None:
-                        relative = _validated_backup_relative_path(relative)
-                        if relative.casefold() not in manifest_files:
-                            raise ValueError("רשומת ספרייה מפנה לקובץ שאינו נמצא בגיבוי.")
+                    if relative is None:
+                        raise ValueError("רשומת ספרייה בגיבוי אינה כוללת נתיב לקובץ.")
+                    relative = _validated_backup_relative_path(relative)
+                    if relative.casefold() not in manifest_files:
+                        raise ValueError("רשומת ספרייה מפנה לקובץ שאינו נמצא בגיבוי.")
                     item_paths[item_id] = relative
             else:
                 # Backward compatibility with backups created before format version 2.
@@ -1541,14 +1556,17 @@ class RecipeLibrary:
                         image_relative = _backup_relative_path(
                             recipe_data.get("image_path"), self.files_dir
                         )
-                        if image_relative and image_relative.casefold() in manifest_files:
-                            recipe_data["image_path"] = str(
-                                self.files_dir.joinpath(*manifest_files[image_relative.casefold()].split("/"))
+                        if not image_relative or image_relative.casefold() not in manifest_files:
+                            raise ValueError(
+                                f"תמונת המתכון של הפריט {item_id} חסרה בגיבוי."
                             )
-                            check_db.execute(
-                                "UPDATE items SET recipe_data=? WHERE id=?",
-                                (json.dumps(recipe_data, ensure_ascii=False), item_id),
-                            )
+                        recipe_data["image_path"] = str(
+                            self.files_dir.joinpath(*manifest_files[image_relative.casefold()].split("/"))
+                        )
+                        check_db.execute(
+                            "UPDATE items SET recipe_data=? WHERE id=?",
+                            (json.dumps(recipe_data, ensure_ascii=False), item_id),
+                        )
                 check_db.commit()
                 restored_count = len(rows)
             finally:

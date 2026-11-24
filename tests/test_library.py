@@ -667,6 +667,12 @@ class בדיקותספרייה(unittest.TestCase):
                     "category": "קינוחים",
                     "is_recipe": True,
                 })
+                cover = original.files_dir / "תמונות מתכונים" / "cover.png"
+                cover.parent.mkdir(parents=True, exist_ok=True)
+                cover.write_bytes(b"fake-png-for-backup-test")
+                recipe_data = original.get_recipe_data(item_id)
+                recipe_data["image_path"] = str(cover)
+                original.set_recipe_data(item_id, recipe_data)
                 original.set_setting("color_theme", "יוקרה")
                 original.set_setting("font_size", "12")
                 backup = Path(temp) / "העברה.zip"
@@ -686,7 +692,11 @@ class בדיקותספרייה(unittest.TestCase):
                 self.assertEqual(expected_path.read_text(encoding="utf-8"), source.read_text(encoding="utf-8"))
                 self.assertEqual(restored_library.item_collection_names(item_id), ["מתכוני שבת"])
                 self.assertEqual(set(restored_library.tag_names(item_id)), {"משפחה", "קינוחים"})
-                self.assertEqual(restored_library.get_recipe_data(item_id)["ingredients"], "תפוחים, קמח")
+                restored_recipe = restored_library.get_recipe_data(item_id)
+                self.assertEqual(restored_recipe["ingredients"], "תפוחים, קמח")
+                expected_cover = profile_b / app.APP_NAME / "הקבצים שלי" / "תמונות מתכונים" / "cover.png"
+                self.assertEqual(Path(restored_recipe["image_path"]), expected_cover)
+                self.assertEqual(expected_cover.read_bytes(), b"fake-png-for-backup-test")
                 self.assertEqual(restored_library.get_setting("color_theme"), "יוקרה")
                 self.assertEqual(restored_library.get_setting("font_size"), "12")
                 restored_library.db.close()
@@ -696,6 +706,36 @@ class בדיקותספרייה(unittest.TestCase):
             else:
                 os.environ["LOCALAPPDATA"] = previous
 
+
+
+    def test_גיבוי_עם_תמונת_מתכון_חסרה_נכשל_בלי_להחליף_גיבוי_קיים(self):
+        previous = os.environ.get("LOCALAPPDATA")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                os.environ["LOCALAPPDATA"] = str(Path(temp) / "profile")
+                source = Path(temp) / "recipe.txt"
+                source.write_text("תוכן מתכון", encoding="utf-8")
+                library = app.RecipeLibrary()
+                self.assertTrue(library.import_one(source)[0])
+                item_id = int(library.rows()[0]["id"])
+                image = library.files_dir / "תמונות מתכונים" / "missing.png"
+                image.parent.mkdir(parents=True, exist_ok=True)
+                image.write_bytes(b"fake-image")
+                library.set_recipe_data(item_id, {"image_path": str(image)})
+                image.unlink()
+
+                backup = Path(temp) / "backup.zip"
+                existing_backup = b"previous-valid-backup-must-survive"
+                backup.write_bytes(existing_backup)
+                with self.assertRaises(ValueError):
+                    library.create_backup(backup)
+                self.assertEqual(backup.read_bytes(), existing_backup)
+                library.db.close()
+        finally:
+            if previous is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = previous
 
     def test_גיבוי_עם_קובץ_חסר_נכשל_בלי_להחליף_גיבוי_קיים(self):
         previous = os.environ.get("LOCALAPPDATA")
