@@ -513,9 +513,9 @@ def configure_ocr():
             pytesseract.pytesseract.tesseract_cmd = str(candidate)
             tessdata = candidate.parent / "tessdata"
             if tessdata.exists():
-                # Tesseract 5 expects TESSDATA_PREFIX to be the directory
-                # containing the tessdata folder, not tessdata itself.
-                os.environ["TESSDATA_PREFIX"] = str(candidate.parent)
+                # Tesseract expects TESSDATA_PREFIX to point directly at the
+                # folder containing the *.traineddata language files.
+                os.environ["TESSDATA_PREFIX"] = str(tessdata.resolve())
             return True
     return False
 

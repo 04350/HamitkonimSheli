@@ -978,6 +978,36 @@ class בדיקותספרייה(unittest.TestCase):
                 os.environ["LOCALAPPDATA"] = previous
 
 
+
+    def test_configure_ocr_sets_TESSDATA_PREFIX_to_the_language_data_folder(self):
+        previous_prefix = os.environ.get("TESSDATA_PREFIX")
+        previous_meipass = getattr(app.sys, "_MEIPASS", None)
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                engine = root / "tesseract"
+                tessdata = engine / "tessdata"
+                tessdata.mkdir(parents=True)
+                executable = engine / "tesseract.exe"
+                executable.write_bytes(b"test-engine")
+                fake = type("FakePytesseract", (), {})()
+                fake.pytesseract = type("PytesseractModule", (), {"tesseract_cmd": ""})()
+                with patch.object(app.sys, "_MEIPASS", str(root), create=True):
+                    with patch.object(app, "pytesseract", fake):
+                        self.assertTrue(app.configure_ocr())
+                self.assertEqual(Path(os.environ["TESSDATA_PREFIX"]), tessdata.resolve())
+                self.assertEqual(fake.pytesseract.tesseract_cmd, str(executable))
+        finally:
+            if previous_prefix is None:
+                os.environ.pop("TESSDATA_PREFIX", None)
+            else:
+                os.environ["TESSDATA_PREFIX"] = previous_prefix
+            if previous_meipass is None:
+                if hasattr(app.sys, "_MEIPASS"):
+                    delattr(app.sys, "_MEIPASS")
+            else:
+                app.sys._MEIPASS = previous_meipass
+
     def test_זיהוי_מודל_heb4_תומך_בנתיב_TESSDATA_PREFIX_ובנתיב_ישיר(self):
         previous = os.environ.get("TESSDATA_PREFIX")
         try:
