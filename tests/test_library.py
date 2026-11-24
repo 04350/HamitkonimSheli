@@ -851,7 +851,7 @@ class בדיקותספרייה(unittest.TestCase):
                             raise OSError("simulated replacement failure")
                         return original_replace(src, dst)
 
-                    with patch("app.os.replace", side_effect=fail_at_selected_replace):
+                    with patch.object(app.os, "replace", side_effect=fail_at_selected_replace):
                         with self.assertRaises(OSError):
                             library.restore_backup(backup)
 
